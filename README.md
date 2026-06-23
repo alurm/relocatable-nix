@@ -64,6 +64,33 @@ nix build .#           # builds `greet` through the hook
 nix run .#prove        # copies the closure to a NON-/nix prefix and runs it
 ```
 
+## Populating a relocatable store
+
+The point of all this is to take a closure and run it from a different prefix.
+Build into your normal store, then **copy** the closure out — do *not* try to
+build directly into the target store:
+
+```sh
+nix build .#demo
+nix copy --no-check-sigs --to "$PWD/s" ./result
+"$PWD/s/nix/store/$(basename "$(readlink -f result)")/bin/hello"   # runs from ./s
+```
+
+- `--no-check-sigs` is required because locally-built paths are not signed by a
+  trusted key.
+- For a fully flattened layout (no `/nix/store` suffix at all), see the
+  `example/` flake's `prove` app, which copies the closure to
+  `/tmp/.../relocated-store/<hash>` and runs it there.
+
+### Why not `nix build --store ./s`?
+
+Building *into* an alternative store (`--store ./s`) does not work for this on a
+typical setup: the build sandbox exposes the real `/nix/store` read-only, so any
+output path that already exists in your real store collides and the builder
+fails with `Permission denied` writing its own `$out`. This is a store/sandbox
+interaction, not a property of the package. Build normally and `nix copy`
+instead.
+
 ## Tests
 
 `nix flake check` runs:
