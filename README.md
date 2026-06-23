@@ -208,8 +208,14 @@ which we set via `--argv0`, so even Python's `sys.executable` stays correct).
   `PT_INTERP`/`RPATH` and breaks when relocated. Self-contained packages whose
   executables only call each other (via their launchers) are fine.
 - **Library closure is auto-derived from `RPATH`**; it assumes nixpkgs-style
-  absolute `RPATH`s. A binary that finds libs some other way (dlopen of an
-  absolute path, etc.) may miss libs at runtime; `relocLibPaths` can add dirs.
+  absolute `RPATH`s. `dlopen` by soname is covered (the farm is consulted at
+  runtime too), but `dlopen` of a hardcoded absolute `/nix/store/...` path is
+  not. `relocLibPaths` can add dirs.
+- **Static ELF binaries are skipped** (no `PT_INTERP`, nothing to invoke). A
+  *truly* static binary is self-contained and fine. A static **glibc** binary
+  that `dlopen`s NSS/iconv modules is not self-contained, but our `ld.so` trick
+  can't help it (there is no `ld.so`); such binaries are already discouraged in
+  Nix and would need an `LD_LIBRARY_PATH`-env wrapper instead.
 - **`env -S` splitting** is not yet handled (rejected at build time).
 - **`ld.so --argv0` / explicit-loader behavior** depends on a recent enough
   glibc; very old loaders lack `--argv0`.
