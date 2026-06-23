@@ -39,17 +39,16 @@
           printf "[report] perl %vd computed 7 * 6 = %d\n", \$^V, 7 * 6;
           EOF
 
-          # 3) a bash script that calls the other two by path relative to itself
-          cat > $out/bin/main <<'EOF'
-          #!${bash}/bin/bash
+          # 3) a bash script that calls the other two by path relative to itself.
+          # Shebang is interpolated; the body is a quoted heredoc kept literal.
+          echo "#!${bash}/bin/bash" > $out/bin/main
+          cat >> $out/bin/main <<'EOF'
           here="$(dirname "$0")"
           echo "[main] running toolkit from: $here"
           "$here/greet"
           "$here/report"
           echo "[main] done"
           EOF
-          # the above heredoc is quoted, so substitute the interpreter explicitly
-          sed -i "1s|.*|#!${bash}/bin/bash|" $out/bin/main
 
           chmod +x $out/bin/greet $out/bin/report $out/bin/main
 

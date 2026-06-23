@@ -1,14 +1,30 @@
 # relocatable-nix
 
-Make Nix packages **relocatable** — runnable from any store prefix, not just
-`/nix/store` — by replacing script shebangs with a tiny self-locating launcher.
+Make Nix executables **relocatable** — runnable from any store prefix, not just
+`/nix/store` — by replacing them with a tiny self-locating launcher.
 
-A normal shebang hardcodes an absolute interpreter path, so the package breaks
-if the store moves. `relocatable-nix` replaces the script's entry point with a
-small statically-linked launcher that finds itself at runtime
-(`/proc/self/exe` on Linux, `_NSGetExecutablePath` on macOS) and execs the
-interpreter resolved **relative to its own location** — the same idea as ELF
-`$ORIGIN`, but in userspace, needing no kernel changes and no privileges.
+The launcher is interpreter-agnostic: it finds itself at runtime
+(`/proc/self/exe` on Linux, `_NSGetExecutablePath` on macOS) and runs the real
+program resolved **relative to its own location** — the same idea as ELF
+`$ORIGIN`, but in userspace, needing no kernel changes and no privileges. It
+works for two cases with the same mechanism:
+
+- **shebang scripts** — resolve the interpreter relative to the script;
+- **dynamic ELF binaries** — invoke `ld.so` explicitly with a relative
+  `--library-path` (loader mode), bypassing the absolute `PT_INTERP`/`RPATH`.
+
+The current build hook targets shebang scripts; ELF wrapping uses the identical
+loader mode (see *Could this work for ELF binaries too?* — it can, with a
+`/proc/self/exe` caveat).
+
+> **Scope.** This relocates *executable entry points*. It does **not** by itself
+> make a whole closure relocatable: absolute symlinks and store-path strings
+> embedded in data files (`.pc`, `.desktop`, configs, caches) remain, and
+> mutable system state (`/var`, `/etc`) is a separate concern nixpkgs handles at
+> activation, not a store property. Full store relocatability is the broader
+> problem tracked in [NixOS/nix#9549](https://github.com/NixOS/nix/issues/9549);
+> this tool is one component of it, best suited to self-contained script/CLI
+> packages. See *Scope & limits*.
 
 ## How it works
 
@@ -75,25 +91,25 @@ Build into your normal store, then **copy** the closure out — do *not* try to
 build directly into the target store:
 
 ```sh
+dest=/tmp/relocated-store
 nix build .#demo
-nix copy --no-check-sigs --to "$PWD/s" ./result
-"$PWD/s/nix/store/$(basename "$(readlink -f result)")/bin/hello"   # runs from ./s
+nix copy --no-check-sigs --to "$dest" ./result
+"$dest/nix/store/$(basename "$(readlink -f result)")/bin/hello"   # runs from $dest
 ```
 
 - `--no-check-sigs` is required because locally-built paths are not signed by a
   trusted key.
 - For a fully flattened layout (no `/nix/store` suffix at all), see the
-  `example/` flake's `prove` app, which copies the closure to
-  `/tmp/.../relocated-store/<hash>` and runs it there.
+  `example/` flake's `prove` app, which copies the closure to a temp
+  `relocated-store/<hash>` and runs it there.
 
-### Why not `nix build --store ./s`?
+### Why not `nix build --store <dir>`?
 
-Building *into* an alternative store (`--store ./s`) does not work for this on a
-typical setup: the build sandbox exposes the real `/nix/store` read-only, so any
-output path that already exists in your real store collides and the builder
-fails with `Permission denied` writing its own `$out`. This is a store/sandbox
-interaction, not a property of the package. Build normally and `nix copy`
-instead.
+Building *into* an alternative store does not work for this on a typical setup:
+the build sandbox exposes the real `/nix/store` read-only, so any output path
+that already exists in your real store collides and the builder fails with
+`Permission denied` writing its own `$out`. This is a store/sandbox interaction,
+not a property of the package. Build normally and `nix copy` instead.
 
 ## Tests
 
