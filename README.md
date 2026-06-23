@@ -154,6 +154,16 @@ cd example
 nix run .#prove   # copies the closure to a non-/nix prefix and runs `main` there
 ```
 
+## Dependency tracking still works
+
+Nix computes runtime dependencies by scanning outputs for the 32-char store
+**hash**, not for the `/nix/store/` prefix. Our relative paths
+(`../../<hash>-glibc-2.42-61/lib`) and the farm's relative symlink targets still
+contain `<hash>-glibc…`, so dependencies are still detected. This is exactly the
+shape [NixOS/nix#9549](https://github.com/NixOS/nix/issues/9549) wants from a
+relocatable store object: references tracked by hash, no store-dir prefix. The
+only requirement is keeping the full `<hash>-name` component, which we do.
+
 ## Could this work for ELF binaries too?
 
 Yes — loader mode is really "run PROGRAM via `ld.so --library-path …`", which is
@@ -161,14 +171,25 @@ exactly how you run a relocated dynamic *ELF* binary (PROGRAM = the binary, no
 trailing script). So the launcher generalizes beyond shebangs to any dynamic
 executable with almost no new logic; shebangs are just one case.
 
-The catch is `/proc/self/exe`: when the launcher `exec`s `ld.so <prog>`, the
-process's `/proc/self/exe` becomes the *loader*, not `prog`. Scripts mostly key
-off `argv`/`$0` so they don't care, but many ELF programs call `/proc/self/exe`
-to locate themselves/their resources and would break. Tools like `wrap-buddy`
-avoid this by patching a stub into the binary's entry point (preserving
-`/proc/self/exe`) instead of exec'ing the loader. So this shim is the right tool
-for scripts and for ELF programs that don't introspect their own path; for
-arbitrary binaries, an entry-point stub is more correct.
+The catch is **`/proc/self/exe`**. We `execve(ld.so, prog)`, so the kernel
+records *ld.so* as the executable. Normally `/proc/self/exe` is the binary (the
+kernel sets it from the main executable and loads `PT_INTERP` separately) — our
+explicit-loader exec is what breaks that. The fix is always to keep the binary
+as the execve'd file, which needs one of:
+
+- an **entry-point stub** (`wrap-buddy`) — the binary stays the main executable
+  and bootstraps the loader from a stub at its entry point. ELF surgery,
+  **Linux-only** (Mach-O/`dyld` differ, and macOS codesigning forbids patching
+  binaries; macOS also has no store-relative loader to relocate);
+- a **kernel `$ORIGIN` in `PT_INTERP`** (resolve a relative loader in-kernel).
+
+There is no unprivileged userspace way to *both* bypass the absolute `PT_INTERP`
+*and* keep the binary as the execve'd file (`prctl(PR_SET_MM_EXE_FILE)` resets
+across `execve`). So this shim is the right tool for **scripts** (interpreters
+use `argv[0]`, which we set via `--argv0`, so even Python's `sys.executable`
+stays correct) and for ELF programs that don't read `/proc/self/exe`; for
+arbitrary binaries — e.g. **runc/Docker**, **Chromium/Electron**, **clang/LLVM**,
+**OpenJDK** — an entry-point stub or kernel support is required.
 
 ## Scope & limits / drawbacks
 
@@ -207,3 +228,24 @@ arbitrary binaries, an entry-point stub is more correct.
   So the on-disk cost is one inode regardless of script count. Still, the
   per-script copy + manifest makes this a per-package, opt-in tool rather than a
   nixpkgs-wide default.
+
+## What full store relocatability would additionally need
+
+This tool relocates **executable entry points**. Moving a whole closure to an
+arbitrary prefix and running *everything* additionally requires:
+
+- **Relativizing absolute symlinks.** nixpkgs and Nix create absolute store
+  symlinks all over (`buildEnv`/`symlinkJoin`, profiles, `result` gc-roots,
+  `ln -s ${dep}/bin/x $out/bin/x`). A fixup pass can rewrite in-store targets to
+  relative (`../../<hash>/bin/x`) — relocatable, and dep-tracking survives since
+  the hash stays in the target. Leave targets outside the store (`/etc`, `/var`,
+  dangling) alone. nixpkgs does not do this by default.
+- **Rewriting store-path strings embedded in data** — `.pc`/`.la`/`.desktop`
+  files, systemd units, GSettings schemas, configs, caches, and paths baked into
+  binaries/scripts as data (not the shebang/RPATH).
+- **The ELF `/proc/self/exe` programs** above (entry-point stub or kernel).
+
+`/var` and `/etc` are **not** part of this: they are mutable system state that
+NixOS materializes at activation, orthogonal to moving the store. Full store
+relocatability is the broader [NixOS/nix#9549](https://github.com/NixOS/nix/issues/9549)
+problem; this tool is one component of it.
