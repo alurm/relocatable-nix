@@ -5,7 +5,9 @@
 #
 #   1. move the real script aside (to <dir>/.<name>.script),
 #   2. drop a copy of the launcher at the original path,
-#   3. write a NUL-separated sidecar (<launcher>.rb) describing how to run it.
+#   3. write a NUL-separated sidecar (<dir>/.<name>.reloc) describing how to
+#      run it. The sidecar keeps the launcher binary identical for every script
+#      (config travels as data), so the hook needs no per-script compilation.
 #
 # Two interpreter cases are handled:
 #
@@ -101,7 +103,7 @@ relocateShebangs() {
                 printf 'l\0%s\0%s\0%s\0' "$loaderRel" "$libdirsRel" "$interpRel"
                 for a in "${interpArgs[@]}"; do [[ -n "$a" ]] && printf '%s\0' "$a"; done
                 printf '%s\0' "$scriptDest"
-            } > "$f.rb"
+            } > "$dir/.$base.reloc"
             echo "$f: loader-mode launcher -> $interpRel via $loaderRel"
         else
             # Static interpreter -> direct-mode sidecar.
@@ -109,7 +111,7 @@ relocateShebangs() {
                 printf 'd\0%s\0' "$interpRel"
                 for a in "${interpArgs[@]}"; do [[ -n "$a" ]] && printf '%s\0' "$a"; done
                 printf '%s\0' "$scriptDest"
-            } > "$f.rb"
+            } > "$dir/.$base.reloc"
             echo "$f: direct-mode launcher -> $interpRel"
         fi
     done < <(find "$@" -type f -perm -0100 -print0)

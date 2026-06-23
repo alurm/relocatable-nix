@@ -16,9 +16,13 @@ For each executable script, the build-time hook:
 
 1. moves the real script aside (`bin/foo` → `bin/.foo.script`),
 2. drops the launcher at the original path (`bin/foo`),
-3. writes a NUL-separated sidecar (`bin/foo.rb`) with the interpreter path
+3. writes a NUL-separated sidecar (`bin/.foo.reloc`) with the interpreter path
    (relative to the launcher), any interpreter args, and the relative script
    path.
+
+The sidecar keeps the launcher binary byte-for-byte identical for every script
+(per-script config lives in data, not code), so the hook just copies one
+prebuilt binary — no compiler, no per-script build.
 
 At runtime the launcher reads the sidecar and execs:
 
@@ -95,12 +99,16 @@ instead.
 
 `nix flake check` runs:
 
-- **`launcher-unit`** — drives the launcher in isolation with a hand-built
-  package layout and sidecar, then moves the whole tree and re-runs it to
-  confirm relocation and argument forwarding.
-- **`relocation`** — builds a package through the hook, copies its closure to a
-  non-`/nix/store` prefix inside the sandbox, runs it there, and asserts the
-  interpreter resolved under the new prefix.
+- **`launcher-unit`** — drives the launcher in isolation: argument forwarding,
+  exit-code propagation, relocation (move the tree and re-run), and a clean
+  error when the sidecar is missing.
+- **`relocation`** — static interpreter; build through the hook, copy the
+  closure to a non-`/nix/store` prefix, run there, assert the interpreter
+  resolved under the new prefix.
+- **`relocation-dynamic`** — dynamic interpreter (`bash`) relocated via
+  loader mode.
+- **`relocation-interscript`** — a script that calls another script by relative
+  path, relocated; verifies the launcher chain works after moving.
 
 ## Dynamic interpreters
 

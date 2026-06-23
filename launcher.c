@@ -6,8 +6,15 @@
 // location, reads a sidecar describing how to run the script's interpreter
 // relative to itself, and execs — so the package works at any store prefix.
 //
-// The sidecar lives at "<self>.rb" and is a list of NUL-separated tokens whose
-// first token selects a mode:
+// Why a sidecar (rather than baking the config into the binary)? The launcher
+// binary is then byte-for-byte identical for every wrapped script: the build
+// hook just copies one prebuilt binary and writes a small data file next to it
+// — no per-script compilation, no compiler in the build. The per-script config
+// (which interpreter, which loader, which script) travels as data.
+//
+// For a launcher at "<dir>/<base>" the sidecar is the hidden sibling
+// "<dir>/.<base>.reloc" (matching the relocated script at "<dir>/.<base>.script").
+// It is a list of NUL-separated tokens whose first token selects a mode:
 //
 //   direct mode  ("d"):
 //       d \0 <interp-rel> \0 [<arg> \0 ...] <script-rel> \0
@@ -74,9 +81,10 @@ static void self_path(char *buf, size_t bufsz) {
 	(void)bufsz;
 }
 
-static char *read_sidecar(const char *self, size_t *len) {
+// Sidecar path for a launcher at <dir>/<base> is <dir>/.<base>.reloc.
+static char *read_sidecar(const char *dir, const char *base, size_t *len) {
 	char path[PATH_MAX];
-	int n = snprintf(path, sizeof(path), "%s.rb", self);
+	int n = snprintf(path, sizeof(path), "%s/.%s.reloc", dir, base);
 	if (n < 0 || (size_t)n >= sizeof(path)) {
 		errno = ENAMETOOLONG;
 		die("sidecar path");
@@ -178,9 +186,11 @@ int main(int argc, char **argv) {
 		return 127;
 	}
 	*slash = '\0';
+	const char *base = strrchr(self, '/');
+	base = base ? base + 1 : self;
 
 	size_t slen;
-	char *sbuf = read_sidecar(self, &slen);
+	char *sbuf = read_sidecar(selfdir, base, &slen);
 	size_t ntok;
 	char **toks = split_tokens(sbuf, slen, &ntok);
 

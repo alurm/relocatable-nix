@@ -83,6 +83,32 @@
             '';
           };
 
+          # A two-script dynamic package where one launcher-wrapped script calls
+          # another by a path relative to itself — the supported inter-script
+          # case. Exercised relocated by relocationInterScriptTest.
+          demoInterScript = pkgs.stdenv.mkDerivation {
+            name = "relocatable-demo-interscript";
+            dontUnpack = true;
+            dontPatchShebangs = true;
+            nativeBuildInputs = [ relocatableShebangsHook ];
+            installPhase = ''
+              mkdir -p $out/bin
+              cat > $out/bin/inner <<EOF
+              #!${pkgs.bash}/bin/bash
+              echo "inner-ran"
+              EOF
+              cat > $out/bin/outer <<EOF
+              #!${pkgs.bash}/bin/bash
+              echo "outer-start"
+              "\$(dirname "\$0")/inner"
+              echo "outer-end"
+              EOF
+              chmod +x $out/bin/inner $out/bin/outer
+              export relocLibPaths="$(cat ${pkgs.closureInfo { rootPaths = [ pkgs.bash ]; }}/store-paths)"
+              relocateShebangs $out/bin
+            '';
+          };
+
           # Test: launcher in isolation, with a hand-built layout and sidecar,
           # then moved to prove relocation.
           launcherUnitTest = pkgs.runCommand "test-launcher-unit" { } ''
@@ -92,20 +118,29 @@
             install -m755 ${pkgs.pkgsStatic.busybox}/bin/busybox $root/sh/bin/sh
             cat > $root/libexec/hello.sh <<'EOS'
             echo "unit-ok $0 $*"
+            exit 7
             EOS
             chmod +x $root/libexec/hello.sh
-            printf 'd\0../sh/bin/sh\0../libexec/hello.sh\0' > $root/bin/hello.rb
+            printf 'd\0../sh/bin/sh\0../libexec/hello.sh\0' > $root/bin/.hello.reloc
 
-            got=$($root/bin/hello a b)
-            echo "in place: $got"
+            rc=0
+            got=$($root/bin/hello a b) || rc=$?
+            echo "in place: $got (rc=$rc)"
             echo "$got" | grep -q '^unit-ok ' || { echo "FAIL: bad output"; exit 1; }
             case "$got" in *" a b") ;; *) echo "FAIL: args not forwarded"; exit 1;; esac
+            [ "$rc" = 7 ] || { echo "FAIL: exit code not propagated (got $rc)"; exit 1; }
 
             # Move the whole tree and re-run: must still work (relocatable).
             mv $root $TMPDIR/moved
-            got2=$($TMPDIR/moved/bin/hello x)
+            got2=$($TMPDIR/moved/bin/hello x) || true
             echo "relocated: $got2"
             echo "$got2" | grep -q '^unit-ok ' || { echo "FAIL: relocated"; exit 1; }
+
+            # Missing sidecar must fail cleanly (non-zero), not crash.
+            install -m755 ${launcher}/bin/launcher $TMPDIR/orphan
+            if $TMPDIR/orphan 2>/dev/null; then
+              echo "FAIL: orphan launcher should error without a sidecar"; exit 1
+            fi
             touch $out
           '';
 
@@ -151,6 +186,27 @@
               || { echo "FAIL: relocated dynamic package did not run"; exit 1; }
             touch $out
           '';
+
+          # Test: relocated package where one script calls another by relative
+          # path — both go through launchers, so the chain works after moving.
+          relocationInterScriptTest = pkgs.runCommand "test-relocation-interscript"
+            {
+              exportReferencesGraph = [ "closure" demoInterScript ];
+            } ''
+            reloc=$TMPDIR/relocated-store
+            mkdir -p $reloc
+            for p in $(grep -E '^/nix/store/' closure | sort -u); do
+              cp -r "$p" "$reloc/$(basename "$p")"
+              chmod -R u+w "$reloc/$(basename "$p")"
+            done
+            name=$(basename ${demoInterScript})
+            got=$("$reloc/$name/bin/outer")
+            echo "$got"
+            echo "$got" | grep -q 'outer-start' || { echo "FAIL: outer"; exit 1; }
+            echo "$got" | grep -q 'inner-ran'   || { echo "FAIL: inner not called"; exit 1; }
+            echo "$got" | grep -q 'outer-end'   || { echo "FAIL: outer-end"; exit 1; }
+            touch $out
+          '';
         in
         {
           packages = { inherit launcher relocatableShebangsHook demo demoDynamic; default = launcher; };
@@ -158,6 +214,7 @@
             launcher-unit = launcherUnitTest;
             relocation = relocationTest;
             relocation-dynamic = relocationDynamicTest;
+            relocation-interscript = relocationInterScriptTest;
           };
           devShells.default = pkgs.mkShell { packages = [ pkgs.gcc ]; };
         };
