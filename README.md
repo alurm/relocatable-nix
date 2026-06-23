@@ -3,6 +3,27 @@
 Make Nix executables **relocatable** — runnable from any store prefix, not just
 `/nix/store` — by replacing them with a tiny self-locating launcher.
 
+## The problem
+
+Nix store paths are absolute: a built binary hardcodes `/nix/store/<hash>-…`
+into its ELF interpreter (`PT_INTERP`) and library paths (`RPATH`), and scripts
+hardcode it in their `#!` line. Move or copy the store to a different prefix —
+ship a closure to a machine that uses a different store dir, run Nix without
+root in `$HOME`, embed packages inside another tool's tree — and those absolute
+paths no longer resolve, so the executables break. Today the usual fixes are
+deploy-time path rewriting (brittle, fixed once extracted) or shipping the store
+at the exact same path everywhere.
+
+## What this does
+
+It makes the **executables** location-independent: each is replaced by a small
+launcher that locates itself at runtime and runs the real program **relative to
+its own position** — the ELF `$ORIGIN` idea, but in userspace, with no kernel
+changes, no privileges, and no binary patching. Copy the closure anywhere and
+the binaries still run; dependency tracking is preserved (references are kept by
+hash). It's a focused building block for relocatable stores, usable today on a
+stock kernel, per-package or fleet-wide via an overlay.
+
 The launcher is interpreter-agnostic: it finds itself at runtime
 (`/proc/self/exe` on Linux, `_NSGetExecutablePath` on macOS) and runs the real
 program resolved **relative to its own location** — the same idea as ELF
