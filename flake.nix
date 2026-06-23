@@ -37,6 +37,7 @@
           relocatableShebangsHook = pkgs.makeSetupHook
             {
               name = "relocatable-shebangs-hook";
+              propagatedBuildInputs = [ pkgs.patchelf ];
             }
             (pkgs.writeText "relocate-shebangs-setup.sh" ''
               relocatableLauncher="${launcher}/bin/launcher"
@@ -63,6 +64,25 @@
             '';
           };
 
+          # A package using a *dynamic* interpreter (bash), made relocatable via
+          # loader-mode launchers. Exercised by the dynamic relocation test.
+          demoDynamic = pkgs.stdenv.mkDerivation {
+            name = "relocatable-demo-dynamic";
+            dontUnpack = true;
+            dontPatchShebangs = true;
+            nativeBuildInputs = [ relocatableShebangsHook ];
+            installPhase = ''
+              mkdir -p $out/bin
+              cat > $out/bin/hi <<EOF
+              #!${pkgs.bash}/bin/bash
+              echo "dyn hello \$BASH_VERSION"
+              EOF
+              chmod +x $out/bin/hi
+              export relocLibPaths="$(cat ${pkgs.closureInfo { rootPaths = [ pkgs.bash ]; }}/store-paths)"
+              relocateShebangs $out/bin
+            '';
+          };
+
           # Test: launcher in isolation, with a hand-built layout and sidecar,
           # then moved to prove relocation.
           launcherUnitTest = pkgs.runCommand "test-launcher-unit" { } ''
@@ -74,7 +94,7 @@
             echo "unit-ok $0 $*"
             EOS
             chmod +x $root/libexec/hello.sh
-            printf '../sh/bin/sh\0../libexec/hello.sh\0' > $root/bin/hello.rb
+            printf 'd\0../sh/bin/sh\0../libexec/hello.sh\0' > $root/bin/hello.rb
 
             got=$($root/bin/hello a b)
             echo "in place: $got"
@@ -111,10 +131,34 @@
               || { echo "FAIL: argv0 not resolved under relocated prefix"; exit 1; }
             touch $out
           '';
+
+          # Test: a dynamic-interpreter package, copied to a non-/nix prefix and
+          # run there (loader-mode launcher invoking ld.so --library-path).
+          relocationDynamicTest = pkgs.runCommand "test-relocation-dynamic"
+            {
+              exportReferencesGraph = [ "closure" demoDynamic ];
+            } ''
+            reloc=$TMPDIR/relocated-store
+            mkdir -p $reloc
+            for p in $(grep -E '^/nix/store/' closure | sort -u); do
+              cp -r "$p" "$reloc/$(basename "$p")"
+              chmod -R u+w "$reloc/$(basename "$p")"
+            done
+            name=$(basename ${demoDynamic})
+            got=$("$reloc/$name/bin/hi")
+            echo "$got"
+            echo "$got" | grep -q 'dyn hello' \
+              || { echo "FAIL: relocated dynamic package did not run"; exit 1; }
+            touch $out
+          '';
         in
         {
-          packages = { inherit launcher relocatableShebangsHook demo; default = launcher; };
-          checks = { launcher-unit = launcherUnitTest; relocation = relocationTest; };
+          packages = { inherit launcher relocatableShebangsHook demo demoDynamic; default = launcher; };
+          checks = {
+            launcher-unit = launcherUnitTest;
+            relocation = relocationTest;
+            relocation-dynamic = relocationDynamicTest;
+          };
           devShells.default = pkgs.mkShell { packages = [ pkgs.gcc ]; };
         };
 

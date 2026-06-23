@@ -1,5 +1,5 @@
 {
-  description = "Example consumer of relocatable-nix: a relocatable script package";
+  description = "Relocatable multi-script toolkit using dynamic interpreters (bash + perl)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   inputs.relocatable-nix.url = "path:..";
@@ -11,49 +11,75 @@
       pkgs = nixpkgs.legacyPackages.${system};
       hook = relocatable-nix.packages.${system}.relocatableShebangsHook;
 
-      # A statically-linked interpreter keeps the whole package relocatable
-      # end-to-end (no ld.so dependency to chase).
-      sh = pkgs.pkgsStatic.busybox;
+      bash = pkgs.bash;
+      perl = pkgs.perl;
 
-      greet = pkgs.stdenv.mkDerivation {
-        name = "greet";
+      # Full runtime closure of the interpreters -> the library search path the
+      # launcher needs to run them relocated.
+      closure = pkgs.closureInfo { rootPaths = [ bash perl ]; };
+
+      toolkit = pkgs.stdenv.mkDerivation {
+        name = "relocatable-toolkit";
         dontUnpack = true;
         dontPatchShebangs = true;
         nativeBuildInputs = [ hook ];
         installPhase = ''
           mkdir -p $out/bin
+
+          # 1) a bash script
           cat > $out/bin/greet <<EOF
-          #!${sh}/bin/sh
-          echo "greetings from a relocatable package"
-          echo "I am: \$0"
-          echo "store prefix does not matter"
+          #!${bash}/bin/bash
+          echo "[greet] hello from bash \$BASH_VERSION"
           EOF
-          chmod +x $out/bin/greet
+
+          # 2) a perl script
+          cat > $out/bin/report <<EOF
+          #!${perl}/bin/perl
+          use strict; use warnings;
+          printf "[report] perl %vd computed 7 * 6 = %d\n", \$^V, 7 * 6;
+          EOF
+
+          # 3) a bash script that calls the other two by path relative to itself
+          cat > $out/bin/main <<'EOF'
+          #!${bash}/bin/bash
+          here="$(dirname "$0")"
+          echo "[main] running toolkit from: $here"
+          "$here/greet"
+          "$here/report"
+          echo "[main] done"
+          EOF
+          # the above heredoc is quoted, so substitute the interpreter explicitly
+          sed -i "1s|.*|#!${bash}/bin/bash|" $out/bin/main
+
+          chmod +x $out/bin/greet $out/bin/report $out/bin/main
+
+          # dynamic interpreters: give the hook the library closure
+          export relocLibPaths="$(cat ${closure}/store-paths)"
           relocateShebangs $out/bin
         '';
       };
     in
     {
-      packages.${system}.default = greet;
+      packages.${system}.default = toolkit;
 
-      # `nix run .#prove` builds greet, copies its closure to a NON-/nix prefix,
-      # and runs it there to demonstrate relocatability.
+      # `nix run .#prove` copies the closure to a NON-/nix prefix and runs `main`
+      # there, exercising both dynamic interpreters relocated.
       apps.${system}.prove = {
         type = "app";
-        program = toString (pkgs.writeShellScript "prove-relocatable" ''
+        program = toString (pkgs.writeShellScript "prove-toolkit" ''
           set -e
-          export PATH=${pkgs.coreutils}/bin:$PATH
-          out=${greet}
+          export PATH=${pkgs.coreutils}/bin:${pkgs.nix}/bin:$PATH
+          out=${toolkit}
           dest=$(mktemp -d)/relocated-store
           mkdir -p "$dest"
           echo "Copying closure to non-/nix prefix: $dest"
-          for p in $(${pkgs.nix}/bin/nix-store -qR "$out"); do
+          for p in $(nix-store -qR "$out"); do
             cp -r "$p" "$dest/$(basename "$p")"
             chmod -R u+w "$dest/$(basename "$p")"
           done
           echo
-          echo "Running relocated copy (note: path is $dest, not /nix/store):"
-          "$dest/$(basename "$out")/bin/greet"
+          echo "=== running relocated toolkit (prefix: $dest) ==="
+          "$dest/$(basename "$out")/bin/main"
         '');
       };
     };

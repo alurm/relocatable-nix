@@ -102,15 +102,59 @@ instead.
   non-`/nix/store` prefix inside the sandbox, runs it there, and asserts the
   interpreter resolved under the new prefix.
 
-## Scope & limits
+## Dynamic interpreters
 
-- **Scripts**: fully handled.
-- **Libraries**: use RPATH `$ORIGIN` (already supported by `ld.so`).
-- **Dynamically-linked interpreters' loader** (`ld.so` via `PT_INTERP`): *not*
-  solved here — that's the one piece needing the kernel, `wrap-buddy`, or a
-  static interpreter. With a static interpreter (e.g. `pkgsStatic.busybox`) the
-  package is relocatable end-to-end with no extra work.
-- `env -S` argument splitting is not yet handled (rejected at build time).
-- Wrapping changes `$0`/`/proc/self/exe` semantics slightly and replaces the
-  transparent `#!` line with an opaque binary — a deliberate tradeoff for
-  portability without kernel support.
+Real interpreters (`bash`, `perl`, `python`, …) are dynamically linked, so a
+relocated copy has two absolute `/nix/store` paths that would break it: the
+ELF loader (`PT_INTERP`) and the library search paths (`RPATH`). The launcher
+solves both **in userspace, without patching any binary**, via *loader mode*:
+instead of exec'ing the interpreter, it invokes the interpreter's `ld.so`
+explicitly with a `--library-path` built from launcher-relative lib dirs:
+
+    <dir>/ld.so --library-path <abs libdirs> --argv0 <interp> <interp> <script> ...
+
+This bypasses the absolute `PT_INTERP` and points `ld.so` at the libraries under
+the relocated prefix. The build hook detects a dynamic interpreter
+(`patchelf --print-interpreter`) and needs the interpreter's library closure —
+pass it via `relocLibPaths` (e.g. from `closureInfo`):
+
+```nix
+relocLibPaths = "$(cat ${pkgs.closureInfo { rootPaths = [ bash perl ]; }}/store-paths)";
+```
+
+The `example/` flake is a multi-script toolkit where a `bash` script calls
+another `bash` script and a `perl` script — all dynamic, all relocatable:
+
+```sh
+cd example
+nix run .#prove   # copies the closure to a non-/nix prefix and runs `main` there
+```
+
+## Scope & limits / drawbacks
+
+- **Opacity.** The transparent `#!` line is replaced by an opaque launcher
+  binary + sidecar. `file`, `head -1`, package scanners, SBOM/security tooling
+  and `patchShebangs --update` can no longer read the interpreter.
+- **`$0` / `/proc/self/exe` shift.** The script sees a constructed `$0`, and in
+  loader mode `/proc/self/exe` inside the interpreter is the *loader*, not the
+  script. Fine for shells/perl/python (they key off `argv`), but software that
+  introspects its own path can be surprised.
+- **Child processes aren't covered.** Loader mode fixes the launched
+  interpreter, but if that interpreter `exec`s another *dynamic* `/nix/store`
+  binary directly (e.g. a shell calling `ls`), the child still has an absolute
+  `PT_INTERP`/`RPATH` and breaks when relocated. Self-contained packages whose
+  scripts only call each other (via their launchers) are fine; calling arbitrary
+  dynamic store binaries is not.
+- **`relocLibPaths` is required for dynamic interpreters** and must contain the
+  full library closure; a missing lib surfaces only at runtime.
+- **`--library-path` can get long** (whole closure) and is baked into each
+  sidecar; the launcher rebuilds the absolute path at exec time.
+- **`env -S` splitting** is not yet handled (rejected at build time).
+- **Per-program launcher binary.** Each wrapped script gets a launcher copy
+  (cannot be symlinked — `/proc/self/exe` would resolve away the sidecar),
+  costing space and defeating store hardlink dedup at nixpkgs scale. This makes
+  it suitable as a per-package, opt-in tool, not a nixpkgs-wide default.
+- **`ld.so --argv0` / explicit-loader behavior** depends on a recent enough
+  glibc; very old loaders lack `--argv0`.
+- **Static interpreters** (e.g. `pkgsStatic.busybox`) skip all of the above —
+  they use the simpler direct mode with no loader or `relocLibPaths` needed.
