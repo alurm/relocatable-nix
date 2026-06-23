@@ -28,7 +28,8 @@
               dontFixup = true;
               buildCommand = ''
                 mkdir -p "$out/bin"
-                $CC -O2 -Wall -o "$out/bin/launcher" ${./launcher.c}
+                $CC -Os -Wall -o "$out/bin/launcher" ${./launcher.c}
+                $STRIP --strip-all "$out/bin/launcher" 2>/dev/null || true
                 chmod 555 "$out/bin/launcher"
               '';
             };

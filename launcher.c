@@ -3,16 +3,16 @@
 // relocatable-nix launcher
 //
 // A tiny self-locating shim that replaces a script's shebang. It finds its own
-// location, reads a sidecar describing how to run the script's interpreter
+// location, reads a manifest describing how to run the script's interpreter
 // relative to itself, and execs — so the package works at any store prefix.
 //
-// Why a sidecar (rather than baking the config into the binary)? The launcher
+// Why a manifest (rather than baking the config into the binary)? The launcher
 // binary is then byte-for-byte identical for every wrapped script: the build
 // hook just copies one prebuilt binary and writes a small data file next to it
 // — no per-script compilation, no compiler in the build. The per-script config
 // (which interpreter, which loader, which script) travels as data.
 //
-// For a launcher at "<dir>/<base>" the sidecar is the hidden sibling
+// For a launcher at "<dir>/<base>" the manifest is the hidden sibling
 // "<dir>/.<base>.reloc" (matching the relocated script at "<dir>/.<base>.script").
 // It is a list of NUL-separated tokens whose first token selects a mode:
 //
@@ -81,17 +81,17 @@ static void self_path(char *buf, size_t bufsz) {
 	(void)bufsz;
 }
 
-// Sidecar path for a launcher at <dir>/<base> is <dir>/.<base>.reloc.
-static char *read_sidecar(const char *dir, const char *base, size_t *len) {
+// Manifest path for a launcher at <dir>/<base> is <dir>/.<base>.reloc.
+static char *read_manifest(const char *dir, const char *base, size_t *len) {
 	char path[PATH_MAX];
 	int n = snprintf(path, sizeof(path), "%s/.%s.reloc", dir, base);
 	if (n < 0 || (size_t)n >= sizeof(path)) {
 		errno = ENAMETOOLONG;
-		die("sidecar path");
+		die("manifest path");
 	}
 	int fd = open(path, O_RDONLY);
 	if (fd < 0)
-		die("open sidecar");
+		die("open manifest");
 
 	size_t cap = 4096, used = 0;
 	char *buf = xmalloc(cap);
@@ -105,7 +105,7 @@ static char *read_sidecar(const char *dir, const char *base, size_t *len) {
 		}
 		ssize_t r = read(fd, buf + used, cap - used);
 		if (r < 0)
-			die("read sidecar");
+			die("read manifest");
 		if (r == 0)
 			break;
 		used += (size_t)r;
@@ -190,12 +190,12 @@ int main(int argc, char **argv) {
 	base = base ? base + 1 : self;
 
 	size_t slen;
-	char *sbuf = read_sidecar(selfdir, base, &slen);
+	char *sbuf = read_manifest(selfdir, base, &slen);
 	size_t ntok;
 	char **toks = split_tokens(sbuf, slen, &ntok);
 
 	if (ntok < 1) {
-		fprintf(stderr, "%s: empty sidecar\n", progname);
+		fprintf(stderr, "%s: empty manifest\n", progname);
 		return 127;
 	}
 
@@ -205,7 +205,7 @@ int main(int argc, char **argv) {
 	if (strcmp(mode, "d") == 0) {
 		// d, interp-rel, [args...], script-rel
 		if (ntok < 3) {
-			fprintf(stderr, "%s: malformed direct sidecar\n", progname);
+			fprintf(stderr, "%s: malformed direct manifest\n", progname);
 			return 127;
 		}
 		char *interp = join(selfdir, toks[1]);
@@ -226,7 +226,7 @@ int main(int argc, char **argv) {
 	} else if (strcmp(mode, "l") == 0) {
 		// l, loader-rel, libdirs-rel, interp-rel, [args...], script-rel
 		if (ntok < 5) {
-			fprintf(stderr, "%s: malformed loader sidecar\n", progname);
+			fprintf(stderr, "%s: malformed loader manifest\n", progname);
 			return 127;
 		}
 		char *loader = join(selfdir, toks[1]);
@@ -254,6 +254,6 @@ int main(int argc, char **argv) {
 		die("execv");
 	}
 
-	fprintf(stderr, "%s: unknown sidecar mode '%s'\n", progname, mode);
+	fprintf(stderr, "%s: unknown manifest mode '%s'\n", progname, mode);
 	return 127;
 }

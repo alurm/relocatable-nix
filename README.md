@@ -16,15 +16,15 @@ For each executable script, the build-time hook:
 
 1. moves the real script aside (`bin/foo` → `bin/.foo.script`),
 2. drops the launcher at the original path (`bin/foo`),
-3. writes a NUL-separated sidecar (`bin/.foo.reloc`) with the interpreter path
+3. writes a NUL-separated manifest (`bin/.foo.reloc`) with the interpreter path
    (relative to the launcher), any interpreter args, and the relative script
    path.
 
-The sidecar keeps the launcher binary byte-for-byte identical for every script
+The manifest keeps the launcher binary byte-for-byte identical for every script
 (per-script config lives in data, not code), so the hook just copies one
 prebuilt binary — no compiler, no per-script build.
 
-At runtime the launcher reads the sidecar and execs:
+At runtime the launcher reads the manifest and execs:
 
     <dir>/<interp-rel>  <args...>  <dir>/<script-rel>  <user args...>
 
@@ -101,7 +101,7 @@ instead.
 
 - **`launcher-unit`** — drives the launcher in isolation: argument forwarding,
   exit-code propagation, relocation (move the tree and re-run), and a clean
-  error when the sidecar is missing.
+  error when the manifest is missing.
 - **`relocation`** — static interpreter; build through the hook, copy the
   closure to a non-`/nix/store` prefix, run there, assert the interpreter
   resolved under the new prefix.
@@ -138,10 +138,26 @@ cd example
 nix run .#prove   # copies the closure to a non-/nix prefix and runs `main` there
 ```
 
+## Could this work for ELF binaries too?
+
+Yes — loader mode is really "run PROGRAM via `ld.so --library-path …`", which is
+exactly how you run a relocated dynamic *ELF* binary (PROGRAM = the binary, no
+trailing script). So the launcher generalizes beyond shebangs to any dynamic
+executable with almost no new logic; shebangs are just one case.
+
+The catch is `/proc/self/exe`: when the launcher `exec`s `ld.so <prog>`, the
+process's `/proc/self/exe` becomes the *loader*, not `prog`. Scripts mostly key
+off `argv`/`$0` so they don't care, but many ELF programs call `/proc/self/exe`
+to locate themselves/their resources and would break. Tools like `wrap-buddy`
+avoid this by patching a stub into the binary's entry point (preserving
+`/proc/self/exe`) instead of exec'ing the loader. So this shim is the right tool
+for scripts and for ELF programs that don't introspect their own path; for
+arbitrary binaries, an entry-point stub is more correct.
+
 ## Scope & limits / drawbacks
 
 - **Opacity.** The transparent `#!` line is replaced by an opaque launcher
-  binary + sidecar. `file`, `head -1`, package scanners, SBOM/security tooling
+  binary + manifest. `file`, `head -1`, package scanners, SBOM/security tooling
   and `patchShebangs --update` can no longer read the interpreter.
 - **`$0` / `/proc/self/exe` shift.** The script sees a constructed `$0`, and in
   loader mode `/proc/self/exe` inside the interpreter is the *loader*, not the
@@ -155,14 +171,23 @@ nix run .#prove   # copies the closure to a non-/nix prefix and runs `main` ther
   dynamic store binaries is not.
 - **`relocLibPaths` is required for dynamic interpreters** and must contain the
   full library closure; a missing lib surfaces only at runtime.
-- **`--library-path` can get long** (whole closure) and is baked into each
-  sidecar; the launcher rebuilds the absolute path at exec time.
 - **`env -S` splitting** is not yet handled (rejected at build time).
-- **Per-program launcher binary.** Each wrapped script gets a launcher copy
-  (cannot be symlinked — `/proc/self/exe` would resolve away the sidecar),
-  costing space and defeating store hardlink dedup at nixpkgs scale. This makes
-  it suitable as a per-package, opt-in tool, not a nixpkgs-wide default.
 - **`ld.so --argv0` / explicit-loader behavior** depends on a recent enough
   glibc; very old loaders lack `--argv0`.
-- **Static interpreters** (e.g. `pkgsStatic.busybox`) skip all of the above —
-  they use the simpler direct mode with no loader or `relocLibPaths` needed.
+- **Static interpreters** (e.g. `pkgsStatic.busybox`) skip the loader machinery
+  entirely — they use the simpler direct mode with no loader or `relocLibPaths`.
+
+### Notes on cost
+
+- **Library path / `ARG_MAX`.** `ld.so --library-path` is a single argv string,
+  capped at `MAX_ARG_STRLEN` (128 KiB on Linux). To stay well under it, the
+  hook collapses the whole library closure into one per-output symlink farm
+  (`<out>/.reloc-libs`, relative symlinks) and passes that single directory.
+- **Launcher size / dedup.** Each wrapped script gets a *copy* of the launcher
+  (~65 KiB, static, stripped). It **cannot be a symlink** (`/proc/self/exe`
+  would resolve it away and miss the manifest), but it **can be a hardlink**:
+  the copies are byte-identical, so `nix-store --optimise` hardlinks them
+  store-wide to a single inode, and ZFS/btrfs block-dedup collapses them too.
+  So the on-disk cost is one inode regardless of script count. Still, the
+  per-script copy + manifest makes this a per-package, opt-in tool rather than a
+  nixpkgs-wide default.
