@@ -49,10 +49,31 @@ nixpkgs.overlays = [ relocatable.overlays.default ];
 
 ```sh
 nix build .#launcher          # the static launcher
-nix-build demo.nix            # a demo package built through the hook
+nix build .#demo              # a demo package built through the hook
 ./result/bin/hello            # runs in place
-# copy the closure to a different prefix and it still runs
+
+nix flake check               # runs the test suite (see below)
 ```
+
+The `example/` directory is a standalone consumer flake that takes
+`relocatable-nix` as an input and demonstrates the full story:
+
+```sh
+cd example
+nix build .#           # builds `greet` through the hook
+nix run .#prove        # copies the closure to a NON-/nix prefix and runs it
+```
+
+## Tests
+
+`nix flake check` runs:
+
+- **`launcher-unit`** — drives the launcher in isolation with a hand-built
+  package layout and sidecar, then moves the whole tree and re-runs it to
+  confirm relocation and argument forwarding.
+- **`relocation`** — builds a package through the hook, copies its closure to a
+  non-`/nix/store` prefix inside the sandbox, runs it there, and asserts the
+  interpreter resolved under the new prefix.
 
 ## Scope & limits
 
