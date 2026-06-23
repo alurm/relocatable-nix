@@ -21,10 +21,16 @@
             in
             buildStdenv.mkDerivation {
               name = "relocatable-nix-launcher";
-              src = ./launcher.c;
+              # Compile a single source file directly. Avoid the unpack/install
+              # phases (and $src) so the build is robust across store backends
+              # (e.g. `--store ./s`) and writes only to $out.
               dontUnpack = true;
-              buildPhase = "$CC -O2 -Wall -o launcher $src";
-              installPhase = "install -Dm555 launcher $out/bin/launcher";
+              dontFixup = true;
+              buildCommand = ''
+                mkdir -p "$out/bin"
+                $CC -O2 -Wall -o "$out/bin/launcher" ${./launcher.c}
+                chmod 555 "$out/bin/launcher"
+              '';
             };
 
           # Setup hook providing `relocateShebangs`, pointed at the launcher.
