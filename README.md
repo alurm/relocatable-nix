@@ -24,20 +24,16 @@ the binaries still run; dependency tracking is preserved (references are kept by
 hash). It's a focused building block for relocatable stores, usable today on a
 stock kernel, per-package or fleet-wide via an overlay.
 
-The launcher is interpreter-agnostic: it finds itself at runtime
-(`/proc/self/exe` on Linux, `_NSGetExecutablePath` on macOS) and runs the real
-program resolved **relative to its own location** — the same idea as ELF
-`$ORIGIN`, but in userspace, needing no kernel changes and no privileges. It
-works for two cases with the same mechanism:
+It finds itself at runtime (`/proc/self/exe` on Linux, `_NSGetExecutablePath` on
+macOS) and handles two cases with one mechanism:
 
 - **shebang scripts** — resolve the interpreter relative to the script;
-- **dynamic ELF binaries** — invoke `ld.so` explicitly with a relative
-  `--library-path` (loader mode), bypassing the absolute `PT_INTERP`/`RPATH`.
+- **dynamic ELF binaries** — invoke `ld.so` with a relative `--library-path`,
+  bypassing the absolute `PT_INTERP`/`RPATH`.
 
-Both shebang scripts and dynamic ELF binaries are wrapped by the build hook;
-the library closure is derived automatically from each binary's `RPATH`, so no
-manual closure plumbing is needed. (ELF wrapping comes with a `/proc/self/exe`
-caveat — see *ELF binaries*.)
+The library closure is derived automatically from each binary's `RPATH`, so
+there's no manual plumbing. (ELF wrapping comes with a `/proc/self/exe` caveat —
+see [ELF binaries](#elf-binaries).)
 
 > **Scope.** This relocates *executable entry points*. It does **not** by itself
 > make a whole closure relocatable: absolute symlinks and store-path strings
@@ -46,7 +42,7 @@ caveat — see *ELF binaries*.)
 > activation, not a store property. Full store relocatability is the broader
 > problem tracked in [NixOS/nix#9549](https://github.com/NixOS/nix/issues/9549);
 > this tool is one component of it, best suited to self-contained script/CLI
-> packages. See *Scope & limits*.
+> packages. See [Scope & limits](#scope--limits--drawbacks).
 
 ## How it works
 
@@ -72,9 +68,9 @@ Per-package (opt-in):
 
 ```nix
 stdenv.mkDerivation {
-  dontPatchShebangs = true;
   nativeBuildInputs = [ relocatable.packages.${system}.relocatableShebangsHook ];
-  postFixup = "relocateExecutables $out/bin";
+  # Run after patchShebangs (which normalizes #!/usr/bin/env … to a store path).
+  postFixup = "relocateExecutables $out";
 }
 ```
 
@@ -87,7 +83,7 @@ nixpkgs.overlays = [ relocatable.overlays.default ];
 
 > ⚠️ The global overlay rebuilds the world and wraps build-time tools too. If a
 > wrapped ELF reads `/proc/self/exe` (clang, runc, Chromium, the JVM, …) it can
-> break — see *ELF binaries*. Treat the overlay as experimental; prefer the
+> break — see [ELF binaries](#elf-binaries). Treat the overlay as experimental; prefer the
 > per-package hook for anything you depend on.
 
 ## Try it
@@ -200,7 +196,7 @@ kernel sets it from the main executable and loads `PT_INTERP` separately) — ou
 explicit-loader exec is what breaks that. The fix is always to keep the binary
 as the execve'd file, which needs one of:
 
-- an **entry-point stub** (`wrap-buddy`) — the binary stays the main executable
+- an **entry-point stub** ([`wrap-buddy`](https://github.com/Mic92/wrap-buddy)) — the binary stays the main executable
   and bootstraps the loader from a stub at its entry point. ELF surgery,
   **Linux-only** (Mach-O/`dyld` differ, and macOS codesigning forbids patching
   binaries; macOS also has no store-relative loader to relocate);
@@ -211,7 +207,7 @@ There is no unprivileged userspace way to *both* bypass the absolute `PT_INTERP`
 across `execve`). So elf mode is safe for ELF programs that **don't** read
 `/proc/self/exe`, but a program that reads it to locate itself/resources will
 get the loader's path and can misbehave — e.g. **runc**, **Chromium/Electron**,
-**clang/LLVM**, **OpenJDK**. Those want an entry-point stub (`wrap-buddy`) or
+**clang/LLVM**, **OpenJDK**. Those want an entry-point stub ([`wrap-buddy`](https://github.com/Mic92/wrap-buddy)) or
 kernel support instead. Scripts are unaffected (interpreters use `argv[0]`,
 which we set via `--argv0`, so even Python's `sys.executable` stays correct).
 
@@ -222,40 +218,37 @@ which we set via `--argv0`, so even Python's `sys.executable` stays correct).
   and `patchShebangs --update` can no longer read the interpreter.
 - **`/proc/self/exe`** in loader/elf mode points at the *loader*, not the
   program (we exec `ld.so`). Scripts are fine (they key off `argv`); an ELF
-  program that reads it to locate itself can misbehave — see *ELF binaries*.
-- **Child processes aren't covered.** If a wrapped program `exec`s another
-  *dynamic* `/nix/store` binary **directly** (not via its launcher) — e.g. a
-  shell calling an unwrapped `ls` — the child still has an absolute
-  `PT_INTERP`/`RPATH` and breaks when relocated. Self-contained packages whose
-  executables only call each other (via their launchers) are fine.
+  program that reads it to locate itself can misbehave — see [ELF binaries](#elf-binaries).
+- **Only wrapped executables relocate.** The whole-output hook covers every
+  executable in the output, so a package's own binaries calling each other is
+  fine. The gap is calling a dynamic binary that *wasn't* wrapped (one outside
+  the relocated set, or invoked by a hardcoded absolute path) — that one still
+  has absolute `PT_INTERP`/`RPATH`. With the overlay (everything wrapped) this
+  rarely arises.
 - **Library closure is auto-derived from `RPATH`**; it assumes nixpkgs-style
   absolute `RPATH`s. `dlopen` by soname is covered (the farm is consulted at
   runtime too), but `dlopen` of a hardcoded absolute `/nix/store/...` path is
   not. `relocLibPaths` can add dirs.
+- **The farm flattens per-object `RPATH` into one search path.** Normally each
+  object resolves a soname via its *own* `RPATH`, so a diamond dependency can
+  legitimately load two versions of the same soname. A single `--library-path`
+  can only offer one, so such (rare) closures may get the wrong version.
 - **Static ELF binaries are skipped** (no `PT_INTERP`, nothing to invoke).
   Self-contained static binaries — including ones that `dlopen` via a relative
   or self-relative path — are already relocatable. A static binary that
-  `dlopen`s by soname from absolute/default paths is the exception, and our
-  `ld.so` trick can't help it (there is no `ld.so` in the process); that case is
-  out of scope here.
-- **`env -S` splitting** is not yet handled (rejected at build time).
-- **Loader/elf mode is glibc/Linux-specific.** It invokes `ld.so --library-path
-  --argv0`, which are glibc flags. The self-locating launcher itself is portable
-  (`_NSGetExecutablePath` on macOS), but on macOS only **direct mode** (static
-  interpreters) works as-is; relocating dynamic binaries there would need a
-  dyld/`@rpath` approach that is not implemented. musl's loader may also differ
-  in flag support.
-- **setuid / file capabilities are lost.** The launcher copy doesn't carry
-  setuid bits or fscaps, and running via `ld.so` drops them anyway — setuid
-  binaries can't be wrapped.
-- **Soname collisions in the farm are first-wins.** If two dependencies ship the
-  same library soname, the farm keeps one; pathological closures could resolve
-  to the wrong one.
-- **A small cost per call and per build.** One extra `exec` at runtime; at build
-  time the RPATH closure walk is O(closure) `patchelf` calls, so wrapping large
-  packages is slow.
-- **`ld.so --argv0` / explicit-loader behavior** depends on a recent enough
-  glibc; very old loaders lack `--argv0`.
+  `dlopen`s by soname from absolute/default paths can't be helped by an `ld.so`
+  trick (there is no `ld.so` in the process); out of scope here.
+- **Loader/elf mode is glibc + Linux only.** It invokes glibc `ld.so` with
+  `--library-path`/`--argv0`. The self-locating launcher is portable
+  (`_NSGetExecutablePath` on macOS), and **direct mode** (static interpreters)
+  works anywhere, but dynamic ELF/interpreter relocation requires glibc's
+  loader: on macOS dynamic binaries are simply **left unwrapped** (and are often
+  already relocatable via `@rpath` + the system `dyld`); a musl loader (no
+  `--argv0`) is likewise unsupported.
+- **A cost per call and per build.** One extra `exec` at runtime. At build time
+  the auto-derivation reads each shared library's `RPATH` once — `O(shared libs
+  in the closure)` `patchelf` calls — so wrapping large closures is slow; pass
+  `relocLibPaths` (e.g. from `closureInfo`) to skip the walk.
 - **Static interpreters** (e.g. `pkgsStatic.busybox`) skip the loader machinery
   entirely — they use the simpler direct mode with no loader or `relocLibPaths`.
 

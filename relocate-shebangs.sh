@@ -1,30 +1,29 @@
 # Build-time hook: make executables relocatable by replacing them with the
 # self-locating launcher.
 #
-# Handles, in one pass over a directory:
-#   * shebang scripts        -> direct mode ("d") if the interpreter is static,
-#                               loader mode ("l") if it is dynamic;
-#   * dynamic ELF binaries   -> elf mode ("e"), invoked via ld.so.
-# Static ELF binaries and shared libraries are left alone (already relocatable
-# / not executables).
+# It runs *after* nixpkgs' patchShebangs, so script shebangs are already
+# normalized to absolute store paths (including `env`/`env -S` handling) — we do
+# not re-parse `env`, we just read the resulting `#!<abs interp> <args>` line.
+# So this composes with patchShebangs rather than reimplementing it.
 #
-# For each wrapped executable we:
-#   1. move the real file aside (to <dir>/.<name>.real or .<name>.script),
-#   2. drop a copy of the launcher at the original path,
-#   3. write a NUL-separated manifest (<dir>/.<name>.reloc) describing how to
-#      run it.  The launcher binary is identical for every executable; per-item
-#      config travels as data, so the hook needs no per-item compilation.
+# Per executable found under the given paths:
+#   * shebang script        -> direct mode ("d") if the interpreter is static,
+#                              loader mode ("l") if it is dynamic;
+#   * dynamic ELF binary     -> elf mode ("e"), run via ld.so;
+#   * static ELF / shared lib / data -> left alone.
 #
-# Dynamic executables need a library search path. We collapse the libraries into
-# one per-output symlink farm (<out>/.reloc-libs, relative symlinks) so
-# ld.so --library-path is a single short entry. The library set is derived
-# automatically from each binary's transitive RPATH closure; set $relocLibPaths
-# (whitespace-separated store paths) to add extra lib dirs if needed.
+# Each wrapped file is moved aside (.<name>.script or .<name>.real), a launcher
+# copy is dropped in its place, and a NUL-separated manifest (.<name>.reloc) is
+# written. The launcher binary is identical for every executable; per-item
+# config is data, so no per-item compilation is needed.
 #
-# Usage:
-#   dontPatchShebangs = true;
-#   nativeBuildInputs = [ relocatableShebangsHook ];
-#   postFixup = "relocateExecutables $out/bin";   # or rely on the overlay
+# Dynamic executables need a library search path; it is derived automatically
+# from each binary's transitive RPATH and collapsed into one per-output symlink
+# farm (<out>/.reloc-libs) passed to `ld.so --library-path`. Set $relocLibPaths
+# (store paths) to add extra lib dirs.
+#
+# Usage (after patchShebangs, e.g. in postFixup), or via the overlay:
+#   postFixup = "relocateExecutables $out";
 
 # Print the transitive set of RPATH lib dirs reachable from the given ELF files.
 _relocLibClosure() {
@@ -37,7 +36,7 @@ _relocLibClosure() {
         seen_file["$f"]=1
         [[ -f "$f" ]] || continue
         rp="$(patchelf --print-rpath "$f" 2>/dev/null || true)"
-        local oldIFS="$IFS" d
+        local oldIFS="$IFS"
         IFS=:
         local -a dirs=($rp)
         IFS="$oldIFS"
@@ -56,9 +55,8 @@ _relocLibClosure() {
 
 relocateExecutables() {
     local farm="${out:-$(dirname "$1")}/.reloc-libs"
-    declare -A _farmDirs=()   # lib dirs already merged into the farm
+    declare -A _farmDirs=()
 
-    # Merge the given lib dirs into the farm as relative symlinks (idempotent).
     _farmAdd() {
         local dir so name
         mkdir -p "$farm"
@@ -74,8 +72,8 @@ relocateExecutables() {
         done
     }
 
-    # Ensure the farm covers the closure of $1 (an ELF) plus its loader's dir
-    # plus any $relocLibPaths overrides, and echo the farm path relative to $2.
+    # Ensure the farm covers $1's lib closure (+ its loader dir + overrides),
+    # echo the farm path relative to $2.
     _ensureFarm() {
         local elf="$1" fromDir="$2" loaderAbs p
         local -a dirs=()
@@ -95,47 +93,25 @@ relocateExecutables() {
         local dir base
         dir="$(dirname "$f")"
         base="$(basename "$f")"
-
-        # Skip our own artifacts so the pass is idempotent (.real/.script/.reloc
-        # are hidden); also skips any pre-existing hidden executables.
-        [[ "$base" == .* ]] && continue
-
+        [[ "$base" == .* ]] && continue   # skip our hidden artifacts (idempotent)
         local manifest="$dir/.$base.reloc"
 
         if isScript "$f"; then
-            # ---- shebang script ----
-            local oldInterpreterLine oldPath arg0 args
-            read -r oldInterpreterLine < "$f" || [ "$oldInterpreterLine" ]
-            read -r oldPath arg0 args <<< "${oldInterpreterLine:2}"
-
-            local newPath
-            local interpArgs=()
-            if [[ "$oldPath" == *"/bin/env" ]]; then
-                if [[ $arg0 == "-"* || $arg0 == *"="* ]]; then
-                    echo "$f: unsupported env directive \"$oldInterpreterLine\"" >&2
-                    exit 1
-                fi
-                newPath="$(PATH="${HOST_PATH:-$PATH}" type -P "$arg0" || true)"
-                read -r -a interpArgs <<< "$args"
-            elif [[ "$oldPath" == /* && -x "$oldPath" ]]; then
-                newPath="$oldPath"
-                read -r -a interpArgs <<< "$arg0 $args"
-            else
-                [[ -z $oldPath ]] && oldPath="/bin/sh"
-                newPath="$(PATH="${HOST_PATH:-$PATH}" type -P "$(basename "$oldPath")" || true)"
-                read -r -a interpArgs <<< "$arg0 $args"
-            fi
-            if [[ -z "$newPath" ]]; then
-                echo "$f: could not resolve interpreter for \"$oldInterpreterLine\"" >&2
+            # patchShebangs already normalized the shebang to "#!<abs> [args]".
+            local line rest interp args
+            read -r line < "$f" || [ "$line" ]
+            rest="${line#\#!}"
+            read -r interp args <<< "$rest"
+            if [[ "$interp" != /* ]]; then
+                echo "$f: shebang '$interp' is not absolute; run patchShebangs first" >&2
                 exit 1
             fi
+            local interpArgs=(); [[ -n "$args" ]] && read -r -a interpArgs <<< "$args"
 
-            local interpRel scriptDest a
-            interpRel="$(realpath --no-symlinks --relative-to="$dir" "$newPath")"
+            local interpRel scriptDest a loaderAbs
+            interpRel="$(realpath --no-symlinks --relative-to="$dir" "$interp")"
             scriptDest=".$base.script"
-
-            local loaderAbs
-            loaderAbs="$(patchelf --print-interpreter "$newPath" 2>/dev/null || true)"
+            loaderAbs="$(patchelf --print-interpreter "$interp" 2>/dev/null || true)"
 
             mv "$f" "$dir/$scriptDest"
             cp "$relocatableLauncher" "$f"; chmod +x "$f"
@@ -143,25 +119,23 @@ relocateExecutables() {
             if [[ -n "$loaderAbs" ]]; then
                 local loaderRel libdirsRel
                 loaderRel="$(realpath --no-symlinks --relative-to="$dir" "$loaderAbs")"
-                libdirsRel="$(_ensureFarm "$newPath" "$dir")"
+                libdirsRel="$(_ensureFarm "$interp" "$dir")"
                 {
                     printf 'l\0%s\0%s\0%s\0' "$loaderRel" "$libdirsRel" "$interpRel"
                     for a in "${interpArgs[@]}"; do [[ -n "$a" ]] && printf '%s\0' "$a"; done
                     printf '%s\0' "$scriptDest"
                 } > "$manifest"
-                echo "$f: script, loader mode -> $interpRel"
             else
                 {
                     printf 'd\0%s\0' "$interpRel"
                     for a in "${interpArgs[@]}"; do [[ -n "$a" ]] && printf '%s\0' "$a"; done
                     printf '%s\0' "$scriptDest"
                 } > "$manifest"
-                echo "$f: script, direct mode -> $interpRel"
             fi
             continue
         fi
 
-        # ---- not a script: dynamic ELF executable? ----
+        # not a script: dynamic ELF executable?
         local loaderAbs
         loaderAbs="$(patchelf --print-interpreter "$f" 2>/dev/null || true)"
         [[ -z "$loaderAbs" ]] && continue   # static ELF, shared lib, or data
@@ -169,12 +143,11 @@ relocateExecutables() {
         local progDest loaderRel libdirsRel
         progDest=".$base.real"
         loaderRel="$(realpath --no-symlinks --relative-to="$dir" "$loaderAbs")"
-        libdirsRel="$(_ensureFarm "$f" "$dir")"   # closure of the binary itself
+        libdirsRel="$(_ensureFarm "$f" "$dir")"
 
         mv "$f" "$dir/$progDest"
         cp "$relocatableLauncher" "$f"; chmod +x "$f"
         printf 'e\0%s\0%s\0%s\0' "$loaderRel" "$libdirsRel" "$progDest" > "$manifest"
-        echo "$f: dynamic ELF, elf mode"
     done < <(find "$@" -type f -perm -0100 -print0)
 }
 

@@ -55,218 +55,25 @@
             }
             (pkgs.writeText "relocate-auto-setup.sh" ''
               _relocateAuto() {
-                if [[ -z "''${dontRelocate-}" && -d "''${prefix:-}/bin" ]]; then
-                  relocateExecutables "$prefix/bin"
+                # Runs after patchShebangs (appended later to fixupOutputHooks).
+                if [[ -z "''${dontRelocate-}" && -e "''${prefix:-}" ]]; then
+                  relocateExecutables "$prefix"
                 fi
               }
               fixupOutputHooks+=(_relocateAuto)
             '');
 
-          # A package built through the hook, used by both `packages.demo` and
-          # the relocation test. Uses a static interpreter so it is relocatable
-          # end-to-end (no ld.so to chase).
-          demo = pkgs.stdenv.mkDerivation {
-            name = "relocatable-demo";
-            dontUnpack = true;
-            dontPatchShebangs = true;
-            nativeBuildInputs = [ relocatableShebangsHook ];
-            installPhase = ''
-              mkdir -p $out/bin
-              cat > $out/bin/hello <<EOF
-              #!${pkgs.pkgsStatic.busybox}/bin/sh
-              echo "hello from relocatable demo"
-              echo "argv0=\$0"
-              EOF
-              chmod +x $out/bin/hello
-              relocateExecutables $out/bin
-            '';
+          suite = import ./checks.nix {
+            inherit pkgs lib launcher;
+            hook = relocatableShebangsHook;
           };
-
-          # A package using a *dynamic* interpreter (bash), made relocatable via
-          # loader-mode launchers. Exercised by the dynamic relocation test.
-          demoDynamic = pkgs.stdenv.mkDerivation {
-            name = "relocatable-demo-dynamic";
-            dontUnpack = true;
-            dontPatchShebangs = true;
-            nativeBuildInputs = [ relocatableShebangsHook ];
-            installPhase = ''
-              mkdir -p $out/bin
-              cat > $out/bin/hi <<EOF
-              #!${pkgs.bash}/bin/bash
-              echo "dyn hello \$BASH_VERSION"
-              EOF
-              chmod +x $out/bin/hi
-              relocateExecutables $out/bin
-            '';
-          };
-
-          # A package wrapping a real dynamic ELF binary (GNU hello) in elf mode.
-          demoElf = pkgs.stdenv.mkDerivation {
-            name = "relocatable-demo-elf";
-            dontUnpack = true;
-            dontPatchShebangs = true;
-            nativeBuildInputs = [ relocatableShebangsHook ];
-            installPhase = ''
-              mkdir -p $out/bin
-              cp ${pkgs.hello}/bin/hello $out/bin/hello
-              chmod +w $out/bin/hello
-              relocateExecutables $out/bin
-            '';
-          };
-
-          # A two-script dynamic package where one launcher-wrapped script calls
-          # another by a path relative to itself — the supported inter-script
-          # case. Exercised relocated by relocationInterScriptTest.
-          demoInterScript = pkgs.stdenv.mkDerivation {
-            name = "relocatable-demo-interscript";
-            dontUnpack = true;
-            dontPatchShebangs = true;
-            nativeBuildInputs = [ relocatableShebangsHook ];
-            installPhase = ''
-              mkdir -p $out/bin
-              cat > $out/bin/inner <<EOF
-              #!${pkgs.bash}/bin/bash
-              echo "inner-ran"
-              EOF
-              cat > $out/bin/outer <<EOF
-              #!${pkgs.bash}/bin/bash
-              echo "outer-start"
-              "\$(dirname "\$0")/inner"
-              echo "outer-end"
-              EOF
-              chmod +x $out/bin/inner $out/bin/outer
-              relocateExecutables $out/bin
-            '';
-          };
-
-          # Test: launcher in isolation, with a hand-built layout and sidecar,
-          # then moved to prove relocation.
-          launcherUnitTest = pkgs.runCommand "test-launcher-unit" { } ''
-            root=$TMPDIR/pkg
-            mkdir -p $root/bin $root/libexec $root/sh/bin
-            install -m755 ${launcher}/bin/launcher $root/bin/hello
-            install -m755 ${pkgs.pkgsStatic.busybox}/bin/busybox $root/sh/bin/sh
-            cat > $root/libexec/hello.sh <<'EOS'
-            echo "unit-ok $0 $*"
-            exit 7
-            EOS
-            chmod +x $root/libexec/hello.sh
-            printf 'd\0../sh/bin/sh\0../libexec/hello.sh\0' > $root/bin/.hello.reloc
-
-            rc=0
-            got=$($root/bin/hello a b) || rc=$?
-            echo "in place: $got (rc=$rc)"
-            echo "$got" | grep -q '^unit-ok ' || { echo "FAIL: bad output"; exit 1; }
-            case "$got" in *" a b") ;; *) echo "FAIL: args not forwarded"; exit 1;; esac
-            [ "$rc" = 7 ] || { echo "FAIL: exit code not propagated (got $rc)"; exit 1; }
-
-            # Move the whole tree and re-run: must still work (relocatable).
-            mv $root $TMPDIR/moved
-            got2=$($TMPDIR/moved/bin/hello x) || true
-            echo "relocated: $got2"
-            echo "$got2" | grep -q '^unit-ok ' || { echo "FAIL: relocated"; exit 1; }
-
-            # Missing sidecar must fail cleanly (non-zero), not crash.
-            install -m755 ${launcher}/bin/launcher $TMPDIR/orphan
-            if $TMPDIR/orphan 2>/dev/null; then
-              echo "FAIL: orphan launcher should error without a sidecar"; exit 1
-            fi
-            touch $out
-          '';
-
-          # Test: a hook-built package, copied to a NON-/nix prefix and run there.
-          relocationTest = pkgs.runCommand "test-relocation"
-            {
-              exportReferencesGraph = [ "closure" demo ];
-            } ''
-            reloc=$TMPDIR/relocated-store
-            mkdir -p $reloc
-            for p in $(grep -E '^/nix/store/' closure | sort -u); do
-              cp -r "$p" "$reloc/$(basename "$p")"
-              chmod -R u+w "$reloc/$(basename "$p")"
-            done
-
-            name=$(basename ${demo})
-            echo "running from non-/nix prefix: $reloc/$name"
-            got=$("$reloc/$name/bin/hello")
-            echo "$got"
-            echo "$got" | grep -q 'hello from relocatable demo' \
-              || { echo "FAIL: relocated package did not run"; exit 1; }
-            echo "$got" | grep -q "argv0=$reloc/" \
-              || { echo "FAIL: argv0 not resolved under relocated prefix"; exit 1; }
-            touch $out
-          '';
-
-          # Test: a dynamic-interpreter package, copied to a non-/nix prefix and
-          # run there (loader-mode launcher invoking ld.so --library-path).
-          relocationDynamicTest = pkgs.runCommand "test-relocation-dynamic"
-            {
-              exportReferencesGraph = [ "closure" demoDynamic ];
-            } ''
-            reloc=$TMPDIR/relocated-store
-            mkdir -p $reloc
-            for p in $(grep -E '^/nix/store/' closure | sort -u); do
-              cp -r "$p" "$reloc/$(basename "$p")"
-              chmod -R u+w "$reloc/$(basename "$p")"
-            done
-            name=$(basename ${demoDynamic})
-            got=$("$reloc/$name/bin/hi")
-            echo "$got"
-            echo "$got" | grep -q 'dyn hello' \
-              || { echo "FAIL: relocated dynamic package did not run"; exit 1; }
-            touch $out
-          '';
-
-          # Test: relocated package where one script calls another by relative
-          # path — both go through launchers, so the chain works after moving.
-          relocationInterScriptTest = pkgs.runCommand "test-relocation-interscript"
-            {
-              exportReferencesGraph = [ "closure" demoInterScript ];
-            } ''
-            reloc=$TMPDIR/relocated-store
-            mkdir -p $reloc
-            for p in $(grep -E '^/nix/store/' closure | sort -u); do
-              cp -r "$p" "$reloc/$(basename "$p")"
-              chmod -R u+w "$reloc/$(basename "$p")"
-            done
-            name=$(basename ${demoInterScript})
-            got=$("$reloc/$name/bin/outer")
-            echo "$got"
-            echo "$got" | grep -q 'outer-start' || { echo "FAIL: outer"; exit 1; }
-            echo "$got" | grep -q 'inner-ran'   || { echo "FAIL: inner not called"; exit 1; }
-            echo "$got" | grep -q 'outer-end'   || { echo "FAIL: outer-end"; exit 1; }
-            touch $out
-          '';
-
-          # Test: a real dynamic ELF binary (GNU hello), wrapped in elf mode and
-          # run from a non-/nix prefix.
-          relocationElfTest = pkgs.runCommand "test-relocation-elf"
-            {
-              exportReferencesGraph = [ "closure" demoElf ];
-            } ''
-            reloc=$TMPDIR/relocated-store
-            mkdir -p $reloc
-            for p in $(grep -E '^/nix/store/' closure | sort -u); do
-              cp -r "$p" "$reloc/$(basename "$p")"
-              chmod -R u+w "$reloc/$(basename "$p")"
-            done
-            name=$(basename ${demoElf})
-            got=$("$reloc/$name/bin/hello")
-            echo "$got"
-            echo "$got" | grep -q 'Hello, world!' \
-              || { echo "FAIL: relocated ELF did not run"; exit 1; }
-            touch $out
-          '';
         in
         {
-          packages = { inherit launcher relocatableShebangsHook relocatableAutoHook demo demoDynamic demoElf; default = launcher; };
-          checks = {
-            launcher-unit = launcherUnitTest;
-            relocation = relocationTest;
-            relocation-dynamic = relocationDynamicTest;
-            relocation-interscript = relocationInterScriptTest;
-            relocation-elf = relocationElfTest;
+          packages = suite.packages // {
+            inherit launcher relocatableShebangsHook relocatableAutoHook;
+            default = launcher;
           };
+          checks = suite.checks;
           devShells.default = pkgs.mkShell { packages = [ pkgs.gcc ]; };
         };
 
