@@ -2,14 +2,15 @@
 //
 // relocatable-nix launcher
 //
-// A tiny self-locating shim that replaces a script's shebang. It finds its own
-// location, reads a manifest describing how to run the script's interpreter
-// relative to itself, and execs — so the package works at any store prefix.
+// A tiny self-locating shim that replaces an executable (a shebang script or a
+// dynamic ELF binary). It finds its own location, reads a manifest describing
+// how to run the real program relative to itself, and execs — so the package
+// works from any store prefix.
 //
 // Why a manifest (rather than baking the config into the binary)? The launcher
-// binary is then byte-for-byte identical for every wrapped script: the build
+// binary is then byte-for-byte identical for every wrapped executable: the build
 // hook just copies one prebuilt binary and writes a small data file next to it
-// — no per-script compilation, no compiler in the build. The per-script config
+// — no per-item compilation, no compiler in the build. The per-item config
 // (which interpreter, which loader, which script) travels as data.
 //
 // For a launcher at "<dir>/<base>" the manifest is the hidden sibling

@@ -188,9 +188,9 @@ as the execve'd file, which needs one of:
 There is no unprivileged userspace way to *both* bypass the absolute `PT_INTERP`
 *and* keep the binary as the execve'd file (`prctl(PR_SET_MM_EXE_FILE)` resets
 across `execve`). So elf mode is safe for ELF programs that **don't** read
-`/proc/self/exe`, but **breaks** ones that do to locate themselves/resources —
-concretely **runc/Docker**, **Chromium/Electron**, **clang/LLVM**, **OpenJDK**,
-Firefox, AppImage, PyInstaller. Those need an entry-point stub (`wrap-buddy`) or
+`/proc/self/exe`, but a program that reads it to locate itself/resources will
+get the loader's path and can misbehave — e.g. **runc**, **Chromium/Electron**,
+**clang/LLVM**, **OpenJDK**. Those want an entry-point stub (`wrap-buddy`) or
 kernel support instead. Scripts are unaffected (interpreters use `argv[0]`,
 which we set via `--argv0`, so even Python's `sys.executable` stays correct).
 
@@ -200,8 +200,8 @@ which we set via `--argv0`, so even Python's `sys.executable` stays correct).
   binary + manifest. `file`, `head -1`, package scanners, SBOM/security tooling
   and `patchShebangs --update` can no longer read the interpreter.
 - **`/proc/self/exe`** in loader/elf mode points at the *loader*, not the
-  program (we exec `ld.so`). Scripts are fine (they key off `argv`); ELF
-  programs that read it break — see *ELF binaries*.
+  program (we exec `ld.so`). Scripts are fine (they key off `argv`); an ELF
+  program that reads it to locate itself can misbehave — see *ELF binaries*.
 - **Child processes aren't covered.** If a wrapped program `exec`s another
   *dynamic* `/nix/store` binary **directly** (not via its launcher) — e.g. a
   shell calling an unwrapped `ls` — the child still has an absolute
@@ -211,12 +211,28 @@ which we set via `--argv0`, so even Python's `sys.executable` stays correct).
   absolute `RPATH`s. `dlopen` by soname is covered (the farm is consulted at
   runtime too), but `dlopen` of a hardcoded absolute `/nix/store/...` path is
   not. `relocLibPaths` can add dirs.
-- **Static ELF binaries are skipped** (no `PT_INTERP`, nothing to invoke). A
-  *truly* static binary is self-contained and fine. A static **glibc** binary
-  that `dlopen`s NSS/iconv modules is not self-contained, but our `ld.so` trick
-  can't help it (there is no `ld.so`); such binaries are already discouraged in
-  Nix and would need an `LD_LIBRARY_PATH`-env wrapper instead.
+- **Static ELF binaries are skipped** (no `PT_INTERP`, nothing to invoke).
+  Self-contained static binaries — including ones that `dlopen` via a relative
+  or self-relative path — are already relocatable. A static binary that
+  `dlopen`s by soname from absolute/default paths is the exception, and our
+  `ld.so` trick can't help it (there is no `ld.so` in the process); that case is
+  out of scope here.
 - **`env -S` splitting** is not yet handled (rejected at build time).
+- **Loader/elf mode is glibc/Linux-specific.** It invokes `ld.so --library-path
+  --argv0`, which are glibc flags. The self-locating launcher itself is portable
+  (`_NSGetExecutablePath` on macOS), but on macOS only **direct mode** (static
+  interpreters) works as-is; relocating dynamic binaries there would need a
+  dyld/`@rpath` approach that is not implemented. musl's loader may also differ
+  in flag support.
+- **setuid / file capabilities are lost.** The launcher copy doesn't carry
+  setuid bits or fscaps, and running via `ld.so` drops them anyway — setuid
+  binaries can't be wrapped.
+- **Soname collisions in the farm are first-wins.** If two dependencies ship the
+  same library soname, the farm keeps one; pathological closures could resolve
+  to the wrong one.
+- **A small cost per call and per build.** One extra `exec` at runtime; at build
+  time the RPATH closure walk is O(closure) `patchelf` calls, so wrapping large
+  packages is slow.
 - **`ld.so --argv0` / explicit-loader behavior** depends on a recent enough
   glibc; very old loaders lack `--argv0`.
 - **Static interpreters** (e.g. `pkgsStatic.busybox`) skip the loader machinery
