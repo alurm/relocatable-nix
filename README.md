@@ -13,9 +13,10 @@ works for two cases with the same mechanism:
 - **dynamic ELF binaries** — invoke `ld.so` explicitly with a relative
   `--library-path` (loader mode), bypassing the absolute `PT_INTERP`/`RPATH`.
 
-The current build hook targets shebang scripts; ELF wrapping uses the identical
-loader mode (see *Could this work for ELF binaries too?* — it can, with a
-`/proc/self/exe` caveat).
+Both shebang scripts and dynamic ELF binaries are wrapped by the build hook;
+the library closure is derived automatically from each binary's `RPATH`, so no
+manual closure plumbing is needed. (ELF wrapping comes with a `/proc/self/exe`
+caveat — see *ELF binaries*.)
 
 > **Scope.** This relocates *executable entry points*. It does **not** by itself
 > make a whole closure relocatable: absolute symlinks and store-path strings
@@ -28,21 +29,19 @@ loader mode (see *Could this work for ELF binaries too?* — it can, with a
 
 ## How it works
 
-For each executable script, the build-time hook:
+For each executable, the build hook:
 
-1. moves the real script aside (`bin/foo` → `bin/.foo.script`),
+1. moves the real file aside (`bin/foo` → `bin/.foo.script` or `bin/.foo.real`),
 2. drops the launcher at the original path (`bin/foo`),
-3. writes a NUL-separated manifest (`bin/.foo.reloc`) with the interpreter path
-   (relative to the launcher), any interpreter args, and the relative script
-   path.
+3. writes a NUL-separated manifest (`bin/.foo.reloc`) describing how to run it.
 
-The manifest keeps the launcher binary byte-for-byte identical for every script
-(per-script config lives in data, not code), so the hook just copies one
-prebuilt binary — no compiler, no per-script build.
+The manifest keeps the launcher binary byte-for-byte identical for every
+executable (per-item config lives in data, not code), so the hook just copies
+one prebuilt binary — no compiler, no per-item build. It has three modes:
 
-At runtime the launcher reads the manifest and execs:
-
-    <dir>/<interp-rel>  <args...>  <dir>/<script-rel>  <user args...>
+- **`d` direct** — static interpreter: exec it directly.
+- **`l` loader** — dynamic interpreter: `ld.so --library-path <farm> … <interp> <script>`.
+- **`e` elf** — dynamic ELF binary: `ld.so --library-path <farm> … <prog>`.
 
 No absolute paths are baked in, so the package works wherever it is extracted.
 
@@ -54,16 +53,21 @@ Per-package (opt-in):
 stdenv.mkDerivation {
   dontPatchShebangs = true;
   nativeBuildInputs = [ relocatable.packages.${system}.relocatableShebangsHook ];
-  # the hook provides `relocateShebangs`; auto-runs in fixup, or call it:
-  # postFixup = "relocateShebangs $out/bin";
+  postFixup = "relocateExecutables $out/bin";
 }
 ```
 
-Global (every package), via overlay:
+Global — wrap **every** package via overlay (auto-runs in fixup; opt out per
+derivation with `dontRelocate = true`):
 
 ```nix
 nixpkgs.overlays = [ relocatable.overlays.default ];
 ```
+
+> ⚠️ The global overlay rebuilds the world and wraps build-time tools too. If a
+> wrapped ELF reads `/proc/self/exe` (clang, runc, Chromium, the JVM, …) it can
+> break — see *ELF binaries*. Treat the overlay as experimental; prefer the
+> per-package hook for anything you depend on.
 
 ## Try it
 
@@ -125,29 +129,26 @@ not a property of the package. Build normally and `nix copy` instead.
   loader mode.
 - **`relocation-interscript`** — a script that calls another script by relative
   path, relocated; verifies the launcher chain works after moving.
+- **`relocation-elf`** — a real dynamic ELF binary (GNU hello) wrapped in elf
+  mode and run relocated.
 
-## Dynamic interpreters
+## Dynamic interpreters & binaries
 
-Real interpreters (`bash`, `perl`, `python`, …) are dynamically linked, so a
-relocated copy has two absolute `/nix/store` paths that would break it: the
-ELF loader (`PT_INTERP`) and the library search paths (`RPATH`). The launcher
-solves both **in userspace, without patching any binary**, via *loader mode*:
-instead of exec'ing the interpreter, it invokes the interpreter's `ld.so`
-explicitly with a `--library-path` built from launcher-relative lib dirs:
+Real interpreters (`bash`, `perl`, `python`, …) and dynamic ELF binaries carry
+two absolute `/nix/store` paths that break when moved: the ELF loader
+(`PT_INTERP`) and the library search paths (`RPATH`). The launcher solves both
+**in userspace, without patching any binary** by invoking `ld.so` explicitly
+with a relative `--library-path`:
 
-    <dir>/ld.so --library-path <abs libdirs> --argv0 <interp> <interp> <script> ...
+    <dir>/ld.so --library-path <farm> --argv0 <name> <prog> ...
 
 This bypasses the absolute `PT_INTERP` and points `ld.so` at the libraries under
-the relocated prefix. The build hook detects a dynamic interpreter
-(`patchelf --print-interpreter`) and needs the interpreter's library closure —
-pass it via `relocLibPaths` (e.g. from `closureInfo`):
+the relocated prefix. The build hook derives the **library closure
+automatically** from each binary's transitive `RPATH` (no `relocLibPaths`
+needed; set it only to add extra dirs).
 
-```nix
-relocLibPaths = "$(cat ${pkgs.closureInfo { rootPaths = [ bash perl ]; }}/store-paths)";
-```
-
-The `example/` flake is a multi-script toolkit where a `bash` script calls
-another `bash` script and a `perl` script — all dynamic, all relocatable:
+The `example/` flake is a toolkit where a `bash` script calls another `bash`
+script, a `perl` script, and a dynamic ELF (GNU hello) — all relocatable:
 
 ```sh
 cd example
@@ -164,12 +165,13 @@ shape [NixOS/nix#9549](https://github.com/NixOS/nix/issues/9549) wants from a
 relocatable store object: references tracked by hash, no store-dir prefix. The
 only requirement is keeping the full `<hash>-name` component, which we do.
 
-## Could this work for ELF binaries too?
+## ELF binaries
 
-Yes — loader mode is really "run PROGRAM via `ld.so --library-path …`", which is
-exactly how you run a relocated dynamic *ELF* binary (PROGRAM = the binary, no
-trailing script). So the launcher generalizes beyond shebangs to any dynamic
-executable with almost no new logic; shebangs are just one case.
+Dynamic ELF binaries are wrapped in **elf mode**: the launcher runs them via
+`ld.so --library-path …`, exactly like loader mode but with the binary itself
+as the program. So this isn't shebang-specific — it relocates any dynamic
+executable. Static ELF binaries and shared libraries are left untouched
+(already relocatable / not executables).
 
 The catch is **`/proc/self/exe`**. We `execve(ld.so, prog)`, so the kernel
 records *ld.so* as the executable. Normally `/proc/self/exe` is the binary (the
@@ -185,29 +187,29 @@ as the execve'd file, which needs one of:
 
 There is no unprivileged userspace way to *both* bypass the absolute `PT_INTERP`
 *and* keep the binary as the execve'd file (`prctl(PR_SET_MM_EXE_FILE)` resets
-across `execve`). So this shim is the right tool for **scripts** (interpreters
-use `argv[0]`, which we set via `--argv0`, so even Python's `sys.executable`
-stays correct) and for ELF programs that don't read `/proc/self/exe`; for
-arbitrary binaries — e.g. **runc/Docker**, **Chromium/Electron**, **clang/LLVM**,
-**OpenJDK** — an entry-point stub or kernel support is required.
+across `execve`). So elf mode is safe for ELF programs that **don't** read
+`/proc/self/exe`, but **breaks** ones that do to locate themselves/resources —
+concretely **runc/Docker**, **Chromium/Electron**, **clang/LLVM**, **OpenJDK**,
+Firefox, AppImage, PyInstaller. Those need an entry-point stub (`wrap-buddy`) or
+kernel support instead. Scripts are unaffected (interpreters use `argv[0]`,
+which we set via `--argv0`, so even Python's `sys.executable` stays correct).
 
 ## Scope & limits / drawbacks
 
 - **Opacity.** The transparent `#!` line is replaced by an opaque launcher
   binary + manifest. `file`, `head -1`, package scanners, SBOM/security tooling
   and `patchShebangs --update` can no longer read the interpreter.
-- **`$0` / `/proc/self/exe` shift.** The script sees a constructed `$0`, and in
-  loader mode `/proc/self/exe` inside the interpreter is the *loader*, not the
-  script. Fine for shells/perl/python (they key off `argv`), but software that
-  introspects its own path can be surprised.
-- **Child processes aren't covered.** Loader mode fixes the launched
-  interpreter, but if that interpreter `exec`s another *dynamic* `/nix/store`
-  binary directly (e.g. a shell calling `ls`), the child still has an absolute
+- **`/proc/self/exe`** in loader/elf mode points at the *loader*, not the
+  program (we exec `ld.so`). Scripts are fine (they key off `argv`); ELF
+  programs that read it break — see *ELF binaries*.
+- **Child processes aren't covered.** If a wrapped program `exec`s another
+  *dynamic* `/nix/store` binary **directly** (not via its launcher) — e.g. a
+  shell calling an unwrapped `ls` — the child still has an absolute
   `PT_INTERP`/`RPATH` and breaks when relocated. Self-contained packages whose
-  scripts only call each other (via their launchers) are fine; calling arbitrary
-  dynamic store binaries is not.
-- **`relocLibPaths` is required for dynamic interpreters** and must contain the
-  full library closure; a missing lib surfaces only at runtime.
+  executables only call each other (via their launchers) are fine.
+- **Library closure is auto-derived from `RPATH`**; it assumes nixpkgs-style
+  absolute `RPATH`s. A binary that finds libs some other way (dlopen of an
+  absolute path, etc.) may miss libs at runtime; `relocLibPaths` can add dirs.
 - **`env -S` splitting** is not yet handled (rejected at build time).
 - **`ld.so --argv0` / explicit-loader behavior** depends on a recent enough
   glibc; very old loaders lack `--argv0`.
@@ -220,14 +222,13 @@ arbitrary binaries — e.g. **runc/Docker**, **Chromium/Electron**, **clang/LLVM
   capped at `MAX_ARG_STRLEN` (128 KiB on Linux). To stay well under it, the
   hook collapses the whole library closure into one per-output symlink farm
   (`<out>/.reloc-libs`, relative symlinks) and passes that single directory.
-- **Launcher size / dedup.** Each wrapped script gets a *copy* of the launcher
-  (~65 KiB, static, stripped). It **cannot be a symlink** (`/proc/self/exe`
-  would resolve it away and miss the manifest), but it **can be a hardlink**:
-  the copies are byte-identical, so `nix-store --optimise` hardlinks them
-  store-wide to a single inode, and ZFS/btrfs block-dedup collapses them too.
-  So the on-disk cost is one inode regardless of script count. Still, the
-  per-script copy + manifest makes this a per-package, opt-in tool rather than a
-  nixpkgs-wide default.
+- **Launcher size / dedup.** Each wrapped executable gets a *copy* of the
+  launcher (~65 KiB, static, stripped). It **cannot be a symlink**
+  (`/proc/self/exe` would resolve it away and miss the manifest), but it **can be
+  a hardlink**: the copies are byte-identical, so `nix-store --optimise`
+  hardlinks them store-wide to a single inode, and ZFS/btrfs block-dedup
+  collapses them too. So the on-disk cost is one inode regardless of how many are
+  wrapped.
 
 ## What full store relocatability would additionally need
 

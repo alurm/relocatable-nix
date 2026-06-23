@@ -21,7 +21,7 @@
 //     exec: <dir>/<interp-rel>  <args...>  <dir>/<script-rel>  <user args...>
 //     (used for interpreters with no dynamic loader to chase, e.g. static)
 //
-//   loader mode  ("l"):
+//   loader mode  ("l"):  dynamically-linked script interpreter
 //       l \0 <loader-rel> \0 <libdirs-rel> \0 <interp-rel> \0 [<arg>\0 ...] <script-rel> \0
 //     exec: <dir>/<loader-rel> --library-path <abs libdirs>
 //             --argv0 <dir>/<interp-rel> <dir>/<interp-rel> <args...>
@@ -31,6 +31,13 @@
 //     a *dynamically* linked interpreter relocatable without patching any
 //     binary: ld.so is invoked explicitly (bypassing the absolute PT_INTERP)
 //     and finds libraries under the relocated prefix.
+//
+//   elf mode  ("e"):  dynamically-linked ELF executable (not a script)
+//       e \0 <loader-rel> \0 <libdirs-rel> \0 <prog-rel> \0
+//     exec: <dir>/<loader-rel> --library-path <abs libdirs>
+//             --argv0 <self> <dir>/<prog-rel> <user args...>
+//     Same idea as loader mode, but the program is the ELF itself. argv0 is set
+//     to the launcher's own path so the program sees its invoked name.
 //
 // All paths are constructed by prefixing the launcher's own directory; we do
 // not realpath() the targets, letting the kernel resolve ".." lazily.
@@ -247,6 +254,30 @@ int main(int argc, char **argv) {
 		for (size_t i = 0; i < nargs; i++)
 			na[k++] = toks[4 + i];
 		na[k++] = script;
+		for (size_t i = 0; i < user; i++)
+			na[k++] = argv[1 + i];
+		na[k] = NULL;
+		execv(loader, na);
+		die("execv");
+	} else if (strcmp(mode, "e") == 0) {
+		// e, loader-rel, libdirs-rel, prog-rel : run a dynamic ELF directly
+		if (ntok < 4) {
+			fprintf(stderr, "%s: malformed elf manifest\n", progname);
+			return 127;
+		}
+		char *loader = join(selfdir, toks[1]);
+		char *libpath = abs_libpath(selfdir, toks[2]);
+		char *prog = join(selfdir, toks[3]);
+
+		// loader --library-path L --argv0 <self> prog user...
+		char **na = xmalloc((6 + user + 1) * sizeof(char *));
+		size_t k = 0;
+		na[k++] = loader;
+		na[k++] = "--library-path";
+		na[k++] = libpath;
+		na[k++] = "--argv0";
+		na[k++] = self;          // preserve the invoked name
+		na[k++] = prog;
 		for (size_t i = 0; i < user; i++)
 			na[k++] = argv[1 + i];
 		na[k] = NULL;

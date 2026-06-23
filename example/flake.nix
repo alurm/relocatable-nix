@@ -1,5 +1,5 @@
 {
-  description = "Relocatable multi-script toolkit using dynamic interpreters (bash + perl)";
+  description = "Relocatable toolkit: dynamic bash + perl scripts and a dynamic ELF binary";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
   inputs.relocatable-nix.url = "path:..";
@@ -13,10 +13,6 @@
 
       bash = pkgs.bash;
       perl = pkgs.perl;
-
-      # Full runtime closure of the interpreters -> the library search path the
-      # launcher needs to run them relocated.
-      closure = pkgs.closureInfo { rootPaths = [ bash perl ]; };
 
       toolkit = pkgs.stdenv.mkDerivation {
         name = "relocatable-toolkit";
@@ -39,7 +35,11 @@
           printf "[report] perl %vd computed 7 * 6 = %d\n", \$^V, 7 * 6;
           EOF
 
-          # 3) a bash script that calls the other two by path relative to itself.
+          # 3) a real dynamic ELF binary (GNU hello)
+          cp ${pkgs.hello}/bin/hello $out/bin/hello
+          chmod +w $out/bin/hello
+
+          # 4) a bash script that calls the others by path relative to itself.
           # Shebang is interpolated; the body is a quoted heredoc kept literal.
           echo "#!${bash}/bin/bash" > $out/bin/main
           cat >> $out/bin/main <<'EOF'
@@ -47,14 +47,15 @@
           echo "[main] running toolkit from: $here"
           "$here/greet"
           "$here/report"
+          "$here/hello"
           echo "[main] done"
           EOF
 
           chmod +x $out/bin/greet $out/bin/report $out/bin/main
 
-          # dynamic interpreters: give the hook the library closure
-          export relocLibPaths="$(cat ${closure}/store-paths)"
-          relocateShebangs $out/bin
+          # Scripts AND the ELF binary are wrapped; the library closure is
+          # derived automatically from each binary's RPATH.
+          relocateExecutables $out/bin
         '';
       };
     in

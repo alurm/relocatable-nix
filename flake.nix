@@ -1,5 +1,5 @@
 {
-  description = "Relocatable Nix packages via self-locating shebang launchers";
+  description = "Relocatable Nix executables (scripts and dynamic ELF) via self-locating launchers";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
 
@@ -34,7 +34,7 @@
               '';
             };
 
-          # Setup hook providing `relocateShebangs`, pointed at the launcher.
+          # Base hook providing `relocateExecutables` (alias `relocateShebangs`).
           relocatableShebangsHook = pkgs.makeSetupHook
             {
               name = "relocatable-shebangs-hook";
@@ -43,6 +43,23 @@
             (pkgs.writeText "relocate-shebangs-setup.sh" ''
               relocatableLauncher="${launcher}/bin/launcher"
               source ${./relocate-shebangs.sh}
+            '');
+
+          # Auto-wrapping variant: registers a fixup hook that relocates every
+          # output's bin/. This is what the overlay uses to "wrap everything";
+          # opt out per-derivation with `dontRelocate = true`.
+          relocatableAutoHook = pkgs.makeSetupHook
+            {
+              name = "relocatable-auto-hook";
+              propagatedBuildInputs = [ relocatableShebangsHook ];
+            }
+            (pkgs.writeText "relocate-auto-setup.sh" ''
+              _relocateAuto() {
+                if [[ -z "''${dontRelocate-}" && -d "''${prefix:-}/bin" ]]; then
+                  relocateExecutables "$prefix/bin"
+                fi
+              }
+              fixupOutputHooks+=(_relocateAuto)
             '');
 
           # A package built through the hook, used by both `packages.demo` and
@@ -61,7 +78,7 @@
               echo "argv0=\$0"
               EOF
               chmod +x $out/bin/hello
-              relocateShebangs $out/bin
+              relocateExecutables $out/bin
             '';
           };
 
@@ -79,8 +96,21 @@
               echo "dyn hello \$BASH_VERSION"
               EOF
               chmod +x $out/bin/hi
-              export relocLibPaths="$(cat ${pkgs.closureInfo { rootPaths = [ pkgs.bash ]; }}/store-paths)"
-              relocateShebangs $out/bin
+              relocateExecutables $out/bin
+            '';
+          };
+
+          # A package wrapping a real dynamic ELF binary (GNU hello) in elf mode.
+          demoElf = pkgs.stdenv.mkDerivation {
+            name = "relocatable-demo-elf";
+            dontUnpack = true;
+            dontPatchShebangs = true;
+            nativeBuildInputs = [ relocatableShebangsHook ];
+            installPhase = ''
+              mkdir -p $out/bin
+              cp ${pkgs.hello}/bin/hello $out/bin/hello
+              chmod +w $out/bin/hello
+              relocateExecutables $out/bin
             '';
           };
 
@@ -105,8 +135,7 @@
               echo "outer-end"
               EOF
               chmod +x $out/bin/inner $out/bin/outer
-              export relocLibPaths="$(cat ${pkgs.closureInfo { rootPaths = [ pkgs.bash ]; }}/store-paths)"
-              relocateShebangs $out/bin
+              relocateExecutables $out/bin
             '';
           };
 
@@ -208,14 +237,35 @@
             echo "$got" | grep -q 'outer-end'   || { echo "FAIL: outer-end"; exit 1; }
             touch $out
           '';
+
+          # Test: a real dynamic ELF binary (GNU hello), wrapped in elf mode and
+          # run from a non-/nix prefix.
+          relocationElfTest = pkgs.runCommand "test-relocation-elf"
+            {
+              exportReferencesGraph = [ "closure" demoElf ];
+            } ''
+            reloc=$TMPDIR/relocated-store
+            mkdir -p $reloc
+            for p in $(grep -E '^/nix/store/' closure | sort -u); do
+              cp -r "$p" "$reloc/$(basename "$p")"
+              chmod -R u+w "$reloc/$(basename "$p")"
+            done
+            name=$(basename ${demoElf})
+            got=$("$reloc/$name/bin/hello")
+            echo "$got"
+            echo "$got" | grep -q 'Hello, world!' \
+              || { echo "FAIL: relocated ELF did not run"; exit 1; }
+            touch $out
+          '';
         in
         {
-          packages = { inherit launcher relocatableShebangsHook demo demoDynamic; default = launcher; };
+          packages = { inherit launcher relocatableShebangsHook relocatableAutoHook demo demoDynamic demoElf; default = launcher; };
           checks = {
             launcher-unit = launcherUnitTest;
             relocation = relocationTest;
             relocation-dynamic = relocationDynamicTest;
             relocation-interscript = relocationInterScriptTest;
+            relocation-elf = relocationElfTest;
           };
           devShells.default = pkgs.mkShell { packages = [ pkgs.gcc ]; };
         };
@@ -227,11 +277,14 @@
       checks = lib.mapAttrs (_: v: v.checks) forAll;
       devShells = lib.mapAttrs (_: v: v.devShells) forAll;
 
-      # Inject the hook into every package's fixup phase.
+      # Inject the auto-wrapping hook into every package's fixup phase, so every
+      # output's bin/ is relocated. Opt out per-derivation with
+      # `dontRelocate = true`. (See the warning in the README before enabling
+      # this globally — it wraps build-time tools too.)
       overlays.default = final: prev: {
         stdenv = prev.stdenv.override (old: {
           extraNativeBuildInputs = (old.extraNativeBuildInputs or [ ])
-            ++ [ self.packages.${prev.stdenv.hostPlatform.system}.relocatableShebangsHook ];
+            ++ [ self.packages.${prev.stdenv.hostPlatform.system}.relocatableAutoHook ];
         });
       };
     };
