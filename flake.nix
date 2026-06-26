@@ -34,15 +34,15 @@
               '';
             };
 
-          # Base hook providing `relocateExecutables` (alias `relocateShebangs`).
-          relocatableShebangsHook = pkgs.makeSetupHook
+          # Base hook providing relocateExecutables.
+          relocatableHook = pkgs.makeSetupHook
             {
-              name = "relocatable-shebangs-hook";
+              name = "relocatable-hook";
               propagatedBuildInputs = [ pkgs.patchelf ];
             }
-            (pkgs.writeText "relocate-shebangs-setup.sh" ''
+            (pkgs.writeText "relocate-setup.sh" ''
               relocatableLauncher="${launcher}/bin/launcher"
-              source ${./relocate-shebangs.sh}
+              source ${./relocate-executables.sh}
             '');
 
           # Auto-wrapping variant: registers a fixup hook that relocates every
@@ -51,7 +51,7 @@
           relocatableAutoHook = pkgs.makeSetupHook
             {
               name = "relocatable-auto-hook";
-              propagatedBuildInputs = [ relocatableShebangsHook ];
+              propagatedBuildInputs = [ relocatableHook ];
             }
             (pkgs.writeText "relocate-auto-setup.sh" ''
               _relocateAuto() {
@@ -65,12 +65,12 @@
 
           suite = import ./checks.nix {
             inherit pkgs lib launcher;
-            hook = relocatableShebangsHook;
+            hook = relocatableHook;
           };
         in
         {
           packages = suite.packages // {
-            inherit launcher relocatableShebangsHook relocatableAutoHook;
+            inherit launcher relocatableHook relocatableAutoHook;
             default = launcher;
           };
           checks = suite.checks;

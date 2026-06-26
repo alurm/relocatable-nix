@@ -150,6 +150,3 @@ relocateExecutables() {
         printf 'e\0%s\0%s\0%s\0' "$loaderRel" "$libdirsRel" "$progDest" > "$manifest"
     done < <(find "$@" -type f -perm -0100 -print0)
 }
-
-# Back-compat alias.
-relocateShebangs() { relocateExecutables "$@"; }

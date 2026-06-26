@@ -68,7 +68,7 @@ Per-package (opt-in):
 
 ```nix
 stdenv.mkDerivation {
-  nativeBuildInputs = [ relocatable.packages.${system}.relocatableShebangsHook ];
+  nativeBuildInputs = [ relocatable.packages.${system}.relocatableHook ];
   # Run after patchShebangs (which normalizes #!/usr/bin/env … to a store path).
   postFixup = "relocateExecutables $out";
 }
@@ -225,7 +225,7 @@ which we set via `--argv0`, so even Python's `sys.executable` stays correct).
   the relocated set, or invoked by a hardcoded absolute path) — that one still
   has absolute `PT_INTERP`/`RPATH`. With the overlay (everything wrapped) this
   rarely arises.
-- **Library closure is auto-derived from `RPATH`**; it assumes nixpkgs-style
+- **The library closure is auto-derived from `RPATH`**; it assumes nixpkgs-style
   absolute `RPATH`s. `dlopen` by soname is covered (the farm is consulted at
   runtime too), but `dlopen` of a hardcoded absolute `/nix/store/...` path is
   not. `relocLibPaths` can add dirs.

@@ -9,7 +9,7 @@
     let
       system = "aarch64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-      hook = relocatable-nix.packages.${system}.relocatableShebangsHook;
+      hook = relocatable-nix.packages.${system}.relocatableHook;
 
       bash = pkgs.bash;
       perl = pkgs.perl;
