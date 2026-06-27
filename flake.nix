@@ -70,15 +70,25 @@
               fixupOutputHooks+=(_relocateAuto)
             '');
 
+          # nixpkgs with our overlay applied, to test overlays.default end to end.
+          overlayPkgs = import nixpkgs {
+            inherit system;
+            overlays = [ self.overlays.default ];
+          };
+
           suite = import ./checks.nix {
             inherit pkgs lib launcher;
             hook = relocatableHook;
             autoHook = relocatableAutoHook;
+            overlayHello = overlayPkgs.hello;
           };
         in
         {
           packages = suite.packages // {
             inherit launcher relocatableHook relocatableAutoHook;
+            # GNU hello built through overlays.default (auto-wrapped). Heavy:
+            # rebuilds the toolchain. `nix build .#overlayHello` to try it.
+            overlayHello = overlayPkgs.hello;
             default = launcher;
           };
           checks = suite.checks;

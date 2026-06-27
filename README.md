@@ -152,6 +152,10 @@ not a property of the package. Build normally and `nix copy` instead.
   script built with the auto hook (patchShebangs enabled, no explicit call),
   auto-wrapped in fixup and run relocated. Covers env normalization and the
   hook-ordering guarantee.
+- **`overlay-wired`** — eval check that `overlays.default` actually changes a
+  stock package's build (the hook is injected). Building a package *through* the
+  overlay rebuilds the toolchain, so the real end-to-end build is on demand:
+  `nix build .#overlayHello` (and `example/`'s `prove` runs it).
 
 ## Dynamic interpreters & binaries
 
