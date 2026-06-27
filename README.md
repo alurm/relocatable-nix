@@ -74,17 +74,29 @@ stdenv.mkDerivation {
 }
 ```
 
-Global — wrap **every** package via overlay (auto-runs in fixup; opt out per
-derivation with `dontRelocate = true`):
+Wrap an **already-built** package (no rebuild, no toolchain involved) — the
+simplest reliable option:
 
 ```nix
-nixpkgs.overlays = [ relocatable.overlays.default ];
+relocatable.lib.${system}.makeRelocatable pkgs.hello
 ```
 
-> ⚠️ The global overlay rebuilds the world and wraps build-time tools too. If a
-> wrapped ELF reads `/proc/self/exe` (clang, runc, Chromium, the JVM, …) it can
-> break — see [ELF binaries](#elf-binaries). Treat the overlay as experimental; prefer the
-> per-package hook for anything you depend on.
+Via an **overlay** that wraps chosen packages' outputs. Each listed package is
+rebuilt with the hook in its own fixup, so **only that package rebuilds** and its
+build inputs stay unwrapped (the toolchain is untouched):
+
+```nix
+nixpkgs.overlays = [
+  (relocatable.lib.${system}.relocateOverlay [ "hello" "ripgrep" "jq" ])
+];
+# nix build nixpkgs#hello  ->  rebuilds only hello, wrapped & relocatable
+```
+
+> ⚠️ Don't wrap a package that is itself a **build-time tool which reads
+> `/proc/self/exe`** (bison, clang, the JVM, runc, …): the wrapped binary
+> misbehaves when run — at build time *and* runtime. See
+> [ELF binaries](#elf-binaries). Wrapping leaf applications is fine; this is why
+> there is no "wrap literally everything" overlay.
 
 ## Try it
 
@@ -152,10 +164,10 @@ not a property of the package. Build normally and `nix copy` instead.
   script built with the auto hook (patchShebangs enabled, no explicit call),
   auto-wrapped in fixup and run relocated. Covers env normalization and the
   hook-ordering guarantee.
-- **`overlay-wired`** — eval check that `overlays.default` actually changes a
-  stock package's build (the hook is injected). Building a package *through* the
-  overlay rebuilds the toolchain, so the real end-to-end build is on demand:
-  `nix build .#overlayHello` (and `example/`'s `prove` runs it).
+- **`relocation-prebuilt`** — wrap a prebuilt stock package (GNU hello) via
+  `makeRelocatable` (no rebuild) and run it relocated.
+- **`overlay`** — end-to-end through `overlays.default`: GNU hello rebuilt by the
+  overlay (only hello rebuilds; toolchain untouched), then run relocated.
 
 ## Dynamic interpreters & binaries
 

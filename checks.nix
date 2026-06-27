@@ -1,6 +1,6 @@
 # Demo packages and the test suite, factored out of flake.nix.
 # Returns { packages = { demo* }; checks = { ... }; }.
-{ pkgs, lib, launcher, hook, autoHook, overlayHello }:
+{ pkgs, lib, launcher, hook, autoHook, overlayHello, relocatableHello }:
 let
   mkDemo = name: install: pkgs.stdenv.mkDerivation {
     inherit name;
@@ -144,13 +144,17 @@ in
       name = "test-relocation-auto"; drv = demoAuto; bin = "auto";
       needles = [ "auto-ok" ];
     };
-    # overlays.default is wired: applying it changes a stock package's build
-    # (the auto hook is injected into stdenv). Eval-only — building through the
-    # overlay rebuilds the whole toolchain, so that is left to `nix build
-    # .#overlayHello` and the relocation-auto check covers the wrapping itself.
-    overlay-wired = pkgs.runCommand "test-overlay-wired" { } (
-      if overlayHello.drvPath != pkgs.hello.drvPath
-      then "echo 'overlay applied: hello drv differs from base'; touch $out"
-      else "echo 'FAIL: overlay did not change hello build' >&2; exit 1");
+    # Wrap a prebuilt stock package (GNU hello) via makeRelocatable — no
+    # rebuild — then run it relocated. The realistic, reliable path.
+    relocation-prebuilt = mkRelocCheck {
+      name = "test-relocation-prebuilt"; drv = relocatableHello; bin = "hello";
+      needles = [ "Hello, world!" ];
+    };
+    # End-to-end through overlays.default: GNU hello, wrapped by the overlay
+    # (rebuilds only hello — its toolchain stays unwrapped), then run relocated.
+    overlay = mkRelocCheck {
+      name = "test-overlay"; drv = overlayHello; bin = "hello";
+      needles = [ "Hello, world!" ];
+    };
   };
 }

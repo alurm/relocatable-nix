@@ -13,6 +13,14 @@
 
       bash = pkgs.bash;
       perl = pkgs.perl;
+
+      # Overlay demo: wrap a stock nixpkgs package (GNU hello). Only hello
+      # rebuilds; its toolchain stays unwrapped.
+      overlayHello = (import nixpkgs {
+        inherit system;
+        overlays = [ (relocatable-nix.lib.${system}.relocateOverlay [ "hello" ]) ];
+      }).hello;
+
       toolkit = pkgs.stdenv.mkDerivation {
         name = "relocatable-toolkit";
         dontUnpack = true;
@@ -59,26 +67,33 @@
       };
     in
     {
-      packages.${system}.default = toolkit;
+      packages.${system} = {
+        default = toolkit;          # built with the per-package hook
+        hello = overlayHello;       # built through the overlay
+      };
 
-      # `nix run .#prove` copies the closure to a NON-/nix prefix and runs `main`
-      # there, exercising both dynamic interpreters relocated.
+      # `nix run .#prove` copies each closure to a NON-/nix prefix and runs it
+      # there — proving relocation for the hook-built toolkit and the
+      # overlay-built hello.
       apps.${system}.prove = {
         type = "app";
-        program = toString (pkgs.writeShellScript "prove-toolkit" ''
+        program = toString (pkgs.writeShellScript "prove" ''
           set -e
           export PATH=${pkgs.coreutils}/bin:${pkgs.nix}/bin:$PATH
-          out=${toolkit}
-          dest=$(mktemp -d)/relocated-store
-          mkdir -p "$dest"
-          echo "Copying closure to non-/nix prefix: $dest"
-          for p in $(nix-store -qR "$out"); do
-            cp -r "$p" "$dest/$(basename "$p")"
-            chmod -R u+w "$dest/$(basename "$p")"
-          done
+          run() { # <store-path> <relative-bin>
+            local out="$1" bin="$2"
+            local dest; dest="$(mktemp -d)/relocated-store"
+            mkdir -p "$dest"
+            for p in $(nix-store -qR "$out"); do
+              cp -r "$p" "$dest/$(basename "$p")"
+              chmod -R u+w "$dest/$(basename "$p")"
+            done
+            echo "=== running relocated from $dest ==="
+            "$dest/$(basename "$out")/$bin"
+          }
+          run ${toolkit} bin/main
           echo
-          echo "=== running relocated toolkit (prefix: $dest) ==="
-          "$dest/$(basename "$out")/bin/main"
+          run ${overlayHello} bin/hello
         '');
       };
     };
