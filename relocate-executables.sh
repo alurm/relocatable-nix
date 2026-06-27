@@ -106,6 +106,12 @@ relocateExecutables() {
                 echo "$f: shebang '$interp' is not absolute; run patchShebangs first" >&2
                 exit 1
             fi
+            if [[ "$interp" == */bin/env ]]; then
+                # patchShebangs would have resolved env to a concrete interpreter;
+                # seeing env here means it didn't run (e.g. dontPatchShebangs).
+                echo "$f: shebang interpreter is env ('$interp'); enable patchShebangs so it resolves to a real interpreter before relocateExecutables" >&2
+                exit 1
+            fi
             local interpArgs=(); [[ -n "$args" ]] && read -r -a interpArgs <<< "$args"
 
             local interpRel scriptDest a loaderAbs

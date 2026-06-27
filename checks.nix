@@ -1,6 +1,6 @@
 # Demo packages and the test suite, factored out of flake.nix.
 # Returns { packages = { demo* }; checks = { ... }; }.
-{ pkgs, lib, launcher, hook }:
+{ pkgs, lib, launcher, hook, autoHook }:
 let
   mkDemo = name: install: pkgs.stdenv.mkDerivation {
     inherit name;
@@ -8,6 +8,25 @@ let
     dontPatchShebangs = true;          # demos hardcode absolute interpreters
     nativeBuildInputs = [ hook ];
     installPhase = install + "\nrelocateExecutables $out/bin\n";
+  };
+
+  # Built like a real package would be under the overlay: the auto hook wraps
+  # everything in fixup, patchShebangs runs (NOT disabled), and the script uses
+  # a raw `#!/usr/bin/env` line — so this exercises env normalization + the
+  # auto-wrap path (the same mechanism overlays.default registers) without a
+  # stdenv rebuild. No explicit relocateExecutables call.
+  demoAuto = pkgs.stdenv.mkDerivation {
+    name = "relocatable-demo-auto";
+    dontUnpack = true;
+    nativeBuildInputs = [ autoHook ];
+    installPhase = ''
+      mkdir -p $out/bin
+      cat > $out/bin/auto <<'EOF'
+      #!/usr/bin/env bash
+      echo "auto-ok $BASH_VERSION"
+      EOF
+      chmod +x $out/bin/auto
+    '';
   };
 
   demo = mkDemo "relocatable-demo" ''
@@ -100,7 +119,7 @@ let
   '';
 in
 {
-  packages = { inherit demo demoDynamic demoElf; };
+  packages = { inherit demo demoDynamic demoElf demoAuto; };
   checks = {
     launcher-unit = launcherUnitTest;
     relocation = mkRelocCheck {
@@ -118,6 +137,12 @@ in
     relocation-elf = mkRelocCheck {
       name = "test-relocation-elf"; drv = demoElf; bin = "hello";
       needles = [ "Hello, world!" ];
+    };
+    # Auto-hook path (overlay mechanism): a raw env shebang, normalized by
+    # patchShebangs and auto-wrapped in fixup, then run relocated.
+    relocation-auto = mkRelocCheck {
+      name = "test-relocation-auto"; drv = demoAuto; bin = "auto";
+      needles = [ "auto-ok" ];
     };
   };
 }

@@ -148,6 +148,10 @@ not a property of the package. Build normally and `nix copy` instead.
   path, relocated; verifies the launcher chain works after moving.
 - **`relocation-elf`** — a real dynamic ELF binary (GNU hello) wrapped in elf
   mode and run relocated.
+- **`relocation-auto`** — the overlay mechanism: a raw `#!/usr/bin/env bash`
+  script built with the auto hook (patchShebangs enabled, no explicit call),
+  auto-wrapped in fixup and run relocated. Covers env normalization and the
+  hook-ordering guarantee.
 
 ## Dynamic interpreters & binaries
 

@@ -13,7 +13,6 @@
 
       bash = pkgs.bash;
       perl = pkgs.perl;
-
       toolkit = pkgs.stdenv.mkDerivation {
         name = "relocatable-toolkit";
         dontUnpack = true;
@@ -58,9 +57,18 @@
           relocateExecutables $out/bin
         '';
       };
+      test-overlay = (import nixpkgs {
+        inherit system;
+        overlays = [
+          relocatable-nix.overlays.default
+        ];
+      }).perl;
     in
     {
-      packages.${system}.default = toolkit;
+      packages.${system} = {
+        default = toolkit;
+        overlayed = test-overlay;
+      };
 
       # `nix run .#prove` copies the closure to a NON-/nix prefix and runs `main`
       # there, exercising both dynamic interpreters relocated.
@@ -80,6 +88,9 @@
           echo
           echo "=== running relocated toolkit (prefix: $dest) ==="
           "$dest/$(basename "$out")/bin/main"
+
+          echo "=== running hello from an overlay ==="
+          ${test-overlay}/bin/perl -e 'print "hi"'
         '');
       };
     };

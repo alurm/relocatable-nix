@@ -55,10 +55,17 @@
             }
             (pkgs.writeText "relocate-auto-setup.sh" ''
               _relocateAuto() {
-                # Runs after patchShebangs (appended later to fixupOutputHooks).
-                if [[ -z "''${dontRelocate-}" && -e "''${prefix:-}" ]]; then
-                  relocateExecutables "$prefix"
+                if [[ -n "''${dontRelocate-}" || ! -e "''${prefix:-}" ]]; then
+                  return 0
                 fi
+                # Normalize shebangs first, independent of fixupOutputHooks
+                # ordering: patchShebangs is idempotent (store-path shebangs are
+                # skipped), so calling it here is safe whether or not it already
+                # ran, and ensures relocateExecutables never sees a raw env line.
+                if declare -F patchShebangsAuto >/dev/null; then
+                  patchShebangsAuto
+                fi
+                relocateExecutables "$prefix"
               }
               fixupOutputHooks+=(_relocateAuto)
             '');
@@ -66,6 +73,7 @@
           suite = import ./checks.nix {
             inherit pkgs lib launcher;
             hook = relocatableHook;
+            autoHook = relocatableAutoHook;
           };
         in
         {
