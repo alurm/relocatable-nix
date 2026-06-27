@@ -83,16 +83,19 @@
             '';
 
           # Rebuild a package with the auto hook in its fixup: only this package
-          # rebuilds, its build inputs stay unwrapped. Used by overlays.default.
+          # rebuilds, its build inputs stay unwrapped. doInstallCheck is dropped
+          # because a tool's own post-fixup self-test would otherwise run its
+          # just-wrapped binary (e.g. bison). Used by the overlays.
           wrap = drv: drv.overrideAttrs (o: {
             nativeBuildInputs = (o.nativeBuildInputs or [ ]) ++ [ relocatableAutoHook ];
+            doInstallCheck = false;
           });
 
-          # nixpkgs with our overlay applied — only used for the eval-level
-          # overlay-wired check (building through it rebuilds the toolchain).
+          # nixpkgs with a selective relocate overlay (wraps only hello), to
+          # exercise the overlay path end to end in a check.
           overlayPkgs = import nixpkgs {
             inherit system;
-            overlays = [ self.overlays.default ];
+            overlays = [ (_final: prev: { hello = wrap prev.hello; }) ];
           };
 
           suite = import ./checks.nix {
@@ -122,22 +125,22 @@
       checks = lib.mapAttrs (_: v: v.checks) forAll;
       devShells = lib.mapAttrs (_: v: v.devShells) forAll;
 
-      # Wrap selected packages' outputs. Each listed package is rebuilt with the
-      # auto hook in its fixup — so only THAT package rebuilds and its build
-      # inputs stay unwrapped (the toolchain is untouched, unlike a stdenv
-      # override). Extend the list, or use `lib.<sys>.makeRelocatable` /
-      # `lib.<sys>.relocateOverlay` for arbitrary packages.
+      # There is intentionally no "wrap everything" overlay: the toolchain
+      # (gcc, binutils, glibc, bash, …) are themselves top-level packages, and a
+      # package's build inputs resolve through the final package set, so wrapping
+      # them rebuilds the world through wrapped — and possibly self-locating —
+      # tools. Wrap a chosen set of leaf packages instead:
       #
-      # Note: do not wrap packages used as build tools that read /proc/self/exe
-      # (bison, clang, …) — they'd break when run. See the README.
-      overlays.default = final: prev:
-        let wrap = self.lib.${prev.stdenv.hostPlatform.system}.wrap;
-        in { hello = wrap prev.hello; };
-
+      #   nixpkgs.overlays = [ (relocatable.lib.${system}.relocateOverlay [ "ripgrep" "jq" ]) ];
+      #
+      # or wrap an already-built package with lib.${system}.makeRelocatable.
       lib = lib.mapAttrs
         (system: v: {
           inherit (v) makeRelocatable wrap;
           # relocateOverlay [ "foo" "bar" ] -> an overlay wrapping those outputs.
+          # Each named package rebuilds with its output wrapped; the toolchain
+          # and everything unnamed stay unwrapped. Name only leaf packages, not
+          # build tools that read /proc/self/exe (see README).
           relocateOverlay = names: _final: prev:
             lib.genAttrs names (n: v.wrap prev.${n});
         })

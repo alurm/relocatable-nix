@@ -92,11 +92,13 @@ nixpkgs.overlays = [
 # nix build nixpkgs#hello  ->  rebuilds only hello, wrapped & relocatable
 ```
 
-> ⚠️ Don't wrap a package that is itself a **build-time tool which reads
-> `/proc/self/exe`** (bison, clang, the JVM, runc, …): the wrapped binary
-> misbehaves when run — at build time *and* runtime. See
-> [ELF binaries](#elf-binaries). Wrapping leaf applications is fine; this is why
-> there is no "wrap literally everything" overlay.
+> ⚠️ Name only **leaf applications**, not build tools. The toolchain (gcc,
+> binutils, glibc, bash, …) are top-level packages too, and a package's build
+> inputs resolve through the final package set — so wrapping them rebuilds the
+> world through wrapped, possibly self-locating (`/proc/self/exe`) tools (bison,
+> clang, …) that break at build *and* run time. That's why there's no
+> "wrap everything" overlay; wrap the specific packages you want relocatable.
+> See [ELF binaries](#elf-binaries).
 
 ## Try it
 
@@ -166,7 +168,7 @@ not a property of the package. Build normally and `nix copy` instead.
   hook-ordering guarantee.
 - **`relocation-prebuilt`** — wrap a prebuilt stock package (GNU hello) via
   `makeRelocatable` (no rebuild) and run it relocated.
-- **`overlay`** — end-to-end through `overlays.default`: GNU hello rebuilt by the
+- **`overlay`** — end-to-end through a `relocateOverlay`: GNU hello rebuilt by the
   overlay (only hello rebuilds; toolchain untouched), then run relocated.
 
 ## Dynamic interpreters & binaries
